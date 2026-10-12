@@ -124,7 +124,7 @@ class TestConfigFile:
 
     def test_config_one_byte_over_the_size_limit_is_refused(self, in_tmp, capsys):
         (in_tmp / "soup.yaml").write_bytes(_config_of_size(MAX_CONFIG_BYTES + 1).encode())
-        assert f"Config file soup.yaml {_SIZE_MESSAGE}" in _refused(capsys)
+        assert _refused(capsys) == f"Config file soup.yaml {_SIZE_MESSAGE}"
 
     def test_size_limit_is_the_one_the_loader_module_names(self, in_tmp, capsys, monkeypatch):
         monkeypatch.setattr(loader, "MAX_CONFIG_BYTES", len(_VALID.encode()) - 1)
