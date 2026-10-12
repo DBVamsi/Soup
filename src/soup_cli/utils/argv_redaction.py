@@ -9,15 +9,22 @@ NAME instead: any value-taking option whose long name contains ``token``,
 replaced with ``<redacted>``, unless the name is listed in
 ``NOT_SECRET_OPTIONS``.
 
-Stdlib + click only: importing this module must stay cheap for the CLI.
+The command tree is read by attribute (``commands``, ``params``, ``opts``),
+never by class: Typer builds it from whichever click it was installed with,
+and that is not always the ``click`` package this module could import. When
+the tree yields no credential option at all, :func:`mask_args_by_name` masks
+on the option names typed on the command line instead.
+
+Stdlib only: importing this module must stay cheap for the CLI.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence
 
-import click
+if TYPE_CHECKING:
+    import click
 
 REDACTED = "<redacted>"
 
@@ -43,12 +50,17 @@ NOT_SECRET_OPTIONS: frozenset[str] = frozenset(
 )
 
 
-def _long_names(option: click.Option) -> list[str]:
-    return [o for o in (*option.opts, *option.secondary_opts) if o.startswith("--")]
+def _long_names(param: object) -> list[str]:
+    """The ``--name`` strings of a parameter; an argument has none."""
+    declared = (
+        *(getattr(param, "opts", None) or ()),
+        *(getattr(param, "secondary_opts", None) or ()),
+    )
+    return [o for o in declared if o.startswith("--")]
 
 
-def _is_secret_option(option: click.Option) -> bool:
-    if option.is_flag or option.count:
+def _is_secret_option(option: object) -> bool:
+    if getattr(option, "is_flag", False) or getattr(option, "count", False):
         return False
     longs = _long_names(option)
     if not any(SECRET_NAME_RE.search(name[2:]) for name in longs):
@@ -60,17 +72,22 @@ def secret_option_strings(command: click.Command) -> frozenset[str]:
     """Every option string (long and short) of ``command``'s credential options."""
     found: set[str] = set()
     for param in getattr(command, "params", None) or ():
-        if isinstance(param, click.Option) and _is_secret_option(param):
+        if _is_secret_option(param):
             found.update(param.opts)
     return frozenset(found)
+
+
+def subcommands(command: object) -> dict | None:
+    """The name -> command mapping of a group, or ``None`` for a leaf command."""
+    found = getattr(command, "commands", None)
+    return found if isinstance(found, dict) else None
 
 
 def iter_commands(command: click.Command) -> Iterable[click.Command]:
     """Yield ``command`` and every command below it."""
     yield command
-    if isinstance(command, click.Group):
-        for sub in command.commands.values():
-            yield from iter_commands(sub)
+    for sub in (subcommands(command) or {}).values():
+        yield from iter_commands(sub)
 
 
 def all_secret_option_strings(root: click.Command) -> frozenset[str]:
@@ -89,14 +106,14 @@ def resolve_command(root: click.Command, args: Sequence[str]) -> click.Command:
     """
     current = root
     tokens = list(args)
-    while isinstance(current, click.Group):
+    while (below := subcommands(current)) is not None:
         index = next(
             (i for i, tok in enumerate(tokens) if not str(tok).startswith("-")),
             None,
         )
         if index is None:
             break
-        sub = current.commands.get(str(tokens[index]))
+        sub = below.get(str(tokens[index]))
         if sub is None:
             break
         current = sub
@@ -158,6 +175,34 @@ def mask_secret_args(args: Sequence[str], secret_opts: frozenset[str]) -> tuple[
             if masked is not None:
                 out.append(masked[0])
                 mask_next = masked[1]
+                continue
+        out.append(tok)
+    return tuple(out)
+
+
+def mask_args_by_name(args: Sequence[str]) -> tuple[str, ...]:
+    """Mask the value of every long option whose NAME looks like a credential.
+
+    Used when the command tree yields no credential option at all, so that
+    situation masks more rather than nothing. Reads only what was typed:
+    ``--name value`` and ``--name=value`` are masked when ``name`` matches
+    ``SECRET_NAME_RE`` and is not in ``NOT_SECRET_OPTIONS``. A switch with such
+    a name hides the token after it, which costs nothing; short options cannot
+    be told apart by name and are left to the value-pattern layer.
+    """
+    out: list[str] = []
+    mask_next = False
+    for raw in args:
+        tok = str(raw)
+        if mask_next:
+            out.append(REDACTED)
+            mask_next = False
+            continue
+        if tok.startswith("--"):
+            name, has_value, _ = tok.partition("=")
+            if SECRET_NAME_RE.search(name[2:]) and name not in NOT_SECRET_OPTIONS:
+                out.append(f"{name}={REDACTED}" if has_value else tok)
+                mask_next = not has_value
                 continue
         out.append(tok)
     return tuple(out)
