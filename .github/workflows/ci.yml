@@ -204,6 +204,31 @@ jobs:
   #   status function (`always()`, `failure()`, ...) in its `if:`, or it runs on
   #   drafts.
   #
+  # 2026-10-12: `plan` picks the upstream stack together with the matrix.
+  #
+  #   QUICK, APPROVAL   install under .github/constraints/pinned-upstream.txt:
+  #                       exact versions of torch, transformers and seven more
+  #   FULL, RELEASE     install with no constraints: the newest release of
+  #                       everything pyproject.toml admits
+  #
+  # Until now every cell resolved the newest release on every run, so one
+  # release upstream failed every open pull request at once, for a reason none
+  # of them could fix from its branch, and a re-run only failed again.
+  # Now it turns the nightly run red: on `main`, once, within a day. The four
+  # jobs that install the project take the switch -- test, pytorch-smoke,
+  # torchao-contract and mlx-smoke -- by ending their one `pip install` with
+  # `plan`'s `constraints` output, which is `-c <that file>` or nothing. Do not
+  # write the `-c` into a step: it would pin the nightly run as well, and a
+  # nightly run on the pinned stack is green for ever and says nothing.
+  # transformers-floor does not take it: it installs its own exact floor on
+  # every run it is part of. lint and type-check install only ruff and mypy.
+  #
+  # What this costs: a pull request is green on the pinned versions, not on
+  # today's. A break that needs the newest release shows on `main` the next
+  # night instead of before the merge, and the pins are only as fresh as their
+  # last bump. The header of the constraints file says when to bump them and how;
+  # tests/test_ci_pinned_upstream.py keeps every pin inside pyproject's bounds.
+  #
   # `timeout-minutes: 5` is not a measurement: one shell step, no checkout, no
   # install.
   plan:
@@ -234,9 +259,13 @@ jobs:
         "exclude": [{"os": "windows-latest", "python-version": "3.10"},
         {"os": "macos-latest", "python-version": "3.10"}]}
       QUICK_MATRIX: '{"os": ["ubuntu-latest"], "python-version": ["3.12"]}'
+      # The pinned upstream stack, named once. QUICK and APPROVAL hand it to the
+      # jobs as `-c <path>`; FULL and RELEASE hand them nothing.
+      PINNED_CONSTRAINTS: .github/constraints/pinned-upstream.txt
     outputs:
       full: ${{ steps.decide.outputs.full }}
       matrix: ${{ steps.decide.outputs.matrix }}
+      constraints: ${{ steps.decide.outputs.constraints }}
     steps:
       - name: Choose the release, full, approval or quick matrix
         id: decide
@@ -249,20 +278,25 @@ jobs:
           if [ "$RELEASE" = "true" ]; then
             full=true
             matrix="$RELEASE_MATRIX"
+            constraints=""
           elif [ "$FULL" = "true" ]; then
             full=true
             matrix="$FULL_MATRIX"
+            constraints=""
           elif [ "$APPROVAL" = "true" ]; then
             full=true
             matrix="$APPROVAL_MATRIX"
+            constraints="-c $PINNED_CONSTRAINTS"
           else
             full=false
             matrix="$QUICK_MATRIX"
+            constraints="-c $PINNED_CONSTRAINTS"
             echo "::notice title=Quick CI run::lint and test (ubuntu-latest, 3.12) only. A pull request gets the other required test cells and the smoke jobs when a maintainer adds the ci:full label; main gets the full matrix every night."
           fi
           {
             echo "full=$full"
             echo "matrix=$matrix"
+            echo "constraints=$constraints"
           } >> "$GITHUB_OUTPUT"
 
   lint:
@@ -347,7 +381,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install only the MLX runtime and smoke-test dependency
-        run: pip install -e ".[mlx]" pytest
+        # The last argument is `-c .github/constraints/pinned-upstream.txt` on a
+        # pull request and empty on the nightly run: see the comment above
+        # `plan`. A constraint installs nothing, so torch stays absent below; it
+        # only fixes the transformers that mlx-lm brings.
+        run: pip install -e ".[mlx]" pytest ${{ needs.plan.outputs.constraints }}
       - name: Verify MLX imports and the PyTorch training stack is absent
         run: |
           python -c "import mlx.core, mlx_lm; print(mlx.core.__version__, mlx_lm.__version__)"
@@ -377,7 +415,9 @@ jobs:
       - name: Install the QAT extra (torchao) beside the dev stack
         # One spec with both extras: `-e ".[dev]" ".[qat]"` asks pip for
         # soup-cli twice, once editable and once not, and resolution fails.
-        run: pip install -e ".[dev,qat]" "torch>=2.6.0"
+        # The last argument is the pinned stack on a pull request and empty on
+        # the nightly run (the comment above `plan`); torchao itself is not in it.
+        run: pip install -e ".[dev,qat]" "torch>=2.6.0" ${{ needs.plan.outputs.constraints }}
       - name: Prove torchao is actually importable, so the tests do not skip
         run: python -c "import torchao; print(torchao.__version__)"
       - name: Resolve every torchao class Soup asks for
@@ -429,8 +469,9 @@ jobs:
         # ships only pytorch_model.bin, and transformers refuses torch.load
         # below 2.6.0 under CVE-2025-32434. Removing this pin because "[dev]
         # already pulls torch" breaks the job with a message naming the CVE
-        # rather than the cause.
-        run: pip install -e ".[dev]" "torch>=2.6.0"
+        # rather than the cause. The last argument is the pinned stack on a pull
+        # request and empty on the nightly run: see the comment above `plan`.
+        run: pip install -e ".[dev]" "torch>=2.6.0" ${{ needs.plan.outputs.constraints }}
 
       - name: Warm tiny GPT-2 cache
         shell: python
@@ -585,7 +626,12 @@ jobs:
         # psutil extra is what `-n logical` counts the CPUs with. Installed here
         # and not in the dev extra: a local run stays serial unless a contributor
         # asks for workers.
-        run: pip install -e ".[dev]" "pytest-xdist[psutil]"
+        #
+        # The last argument comes from `plan`: on a pull request and on a push to
+        # main it is `-c .github/constraints/pinned-upstream.txt`, on the nightly
+        # run, a manual dispatch and release/** it is empty and pip resolves the
+        # newest release of everything. One step, both cases.
+        run: pip install -e ".[dev]" "pytest-xdist[psutil]" ${{ needs.plan.outputs.constraints }}
       - name: Warm HF Hub cache (models the tests load)
         # Pre-download the models the unit tests load, with retries, so a
         # transient HF Hub 429 (Too Many Requests) on a single matrix cell does

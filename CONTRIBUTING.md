@@ -568,6 +568,16 @@ branch runs every cell.
 draft, whatever is pushed to it. Mark it ready for review and the quick set
 starts on its current head.
 
+**Pull-request CI installs a pinned upstream stack.** On a pull request and on a
+push to `main`, every job that installs the project takes torch, transformers
+and the packages they resolve with at the exact versions in
+`.github/constraints/pinned-upstream.txt`, so a release upstream cannot turn
+every open pull request red at once. The nightly run on `main` installs with no
+constraints, and that is where a new release shows first. If your change moves a
+bound in `pyproject.toml` past one of those pins, move the pin in the same pull
+request: `tests/test_ci_pinned_upstream.py` names the pin, and the header of the
+constraints file says how to pick the new version.
+
 **CI runs the tests in parallel.** Every `test (...)` cell runs the suite with
 `pytest-xdist`, one test file per worker process (`-n logical --dist loadfile`).
 The tests of one file still run in order in one process, but two files can run

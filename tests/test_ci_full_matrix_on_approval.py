@@ -28,6 +28,15 @@ run has reported. APPROVAL must name exactly the required contexts: a cell it
 drops that branch protection still requires would lock every merge, and a
 required cell it drops silently would stop being tested before merge at all.
 
+``plan`` makes one more decision with the matrix: which upstream stack the run
+installs. QUICK and APPROVAL -- every pull-request run and every push to
+``main`` -- install under ``.github/constraints/pinned-upstream.txt``, so a new
+release of torch or transformers cannot redden every open pull request at once.
+FULL and RELEASE install with no constraints, so the same release does show, on
+``main``, within a day. A nightly run that was pinned by mistake would stay
+green for ever and say nothing; ``TestPinnedUpstream`` pins both directions.
+``tests/test_ci_pinned_upstream.py`` checks the constraints file itself.
+
 Nothing here talks to GitHub. The workflow is read as YAML, the ``plan`` step's
 shell runs under a local bash, and the expressions GitHub would evaluate are
 evaluated by a small interpreter for exactly the operators they use.
@@ -38,6 +47,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -49,6 +59,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / ".github" / "workflows" / "ci.yml"
+DRIFT = ROOT / ".github" / "workflows" / "dependency-drift.yml"
 CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 
 LABEL = "ci:full"
@@ -104,6 +115,19 @@ RELEASE_ONLY_CONTEXTS = frozenset({"test (windows-latest, 3.11)", "test (macos-l
 #: The condition on the two jobs that wait for nothing: everything but a draft pull request.
 DRAFT_GATE = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
 UNGATED_JOBS = ("plan", "lint")
+#: The pinned upstream stack, relative to the checkout: what a pull-request run and a push
+#: to ``main`` install under.
+PINNED_CONSTRAINTS = ".github/constraints/pinned-upstream.txt"
+#: The kinds of run that install under it. FULL and RELEASE resolve the newest release of
+#: everything: they are where an upstream break has to show.
+PINNED_KINDS = frozenset({"QUICK", "APPROVAL"})
+#: The jobs that install the project and follow ``plan``'s choice of stack.
+SWITCHED_JOBS = ("test", "pytorch-smoke", "torchao-contract", "mlx-smoke")
+#: ``transformers-floor`` installs under its own exact floor on every run it is part of.
+FLOOR_JOB = "transformers-floor"
+FLOOR_CONSTRAINTS = ".github/constraints/transformers-floor.txt"
+#: How a step refers to ``plan``'s choice.
+CONSTRAINTS_OUTPUT = "needs.plan.outputs.constraints"
 
 
 # --- Reading the workflow ----------------------------------------------------
@@ -562,6 +586,7 @@ class TestPlanDecision:
         assert plan["outputs"] == {
             "full": "${{ steps.decide.outputs.full }}",
             "matrix": "${{ steps.decide.outputs.matrix }}",
+            "constraints": "${{ steps.decide.outputs.constraints }}",
         }
 
     @pytest.mark.parametrize(("context", "kind"), EVENTS)
@@ -749,9 +774,50 @@ def _posix_bash() -> str | None:
 
 
 BASH = _posix_bash()
+NEEDS_BASH = pytest.mark.skipif(
+    BASH is None, reason="no POSIX bash found (on Windows: Git for Windows)"
+)
 
 
-@pytest.mark.skipif(BASH is None, reason="no POSIX bash found (on Windows: Git for Windows)")
+def _decide(tmp_path: Path, *, release: str, full: str, approval: str) -> dict[str, str]:
+    """Run the plan step's shell with the given decision values; return its outputs.
+
+    The step sees the ``plan`` job's own ``env:`` -- the four matrices and the path of
+    the pinned constraints -- as it does on the runner, and what it appends to
+    ``$GITHUB_OUTPUT`` comes back as ``{name: value}``: exactly ``full``, ``matrix`` and
+    ``constraints``, one line each.
+    """
+    assert BASH is not None
+    output = tmp_path / "github_output"
+    output.write_text("", encoding="utf-8")
+    script = tmp_path / "decide.sh"
+    script.write_bytes(_decide_step()["run"].encode("utf-8"))
+    env = {
+        **os.environ,
+        **{name: str(value) for name, value in (_plan().get("env") or {}).items()},
+        **{name: _literal(name) for name in MATRIX_NAMES},
+        "RELEASE": release,
+        "FULL": full,
+        "APPROVAL": approval,
+        "GITHUB_OUTPUT": output.as_posix(),
+    }
+    result = subprocess.run(
+        [BASH, "--noprofile", "--norc", "-eo", "pipefail", script.as_posix()],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    lines = output.read_text(encoding="utf-8").splitlines()
+    pairs = [line.partition("=") for line in lines]
+    assert [key for key, _, _ in pairs] == ["full", "matrix", "constraints"], lines
+    return {key: value for key, _, value in pairs}
+
+
+@NEEDS_BASH
 class TestTheDecideStepScript:
     """Run the plan step's own shell, as the runner would, against a fake $GITHUB_OUTPUT."""
 
@@ -759,35 +825,8 @@ class TestTheDecideStepScript:
         self, tmp_path: Path, *, release: str, full: str, approval: str
     ) -> tuple[str, Any]:
         """Run the step with the given decision values; return (full, parsed matrix)."""
-        assert BASH is not None
-        output = tmp_path / "github_output"
-        output.write_text("", encoding="utf-8")
-        script = tmp_path / "decide.sh"
-        script.write_bytes(_decide_step()["run"].encode("utf-8"))
-        env = {
-            **os.environ,
-            **{name: _literal(name) for name in MATRIX_NAMES},
-            "RELEASE": release,
-            "FULL": full,
-            "APPROVAL": approval,
-            "GITHUB_OUTPUT": output.as_posix(),
-        }
-        result = subprocess.run(
-            [BASH, "--noprofile", "--norc", "-eo", "pipefail", script.as_posix()],
-            env=env,
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            check=False,
-        )
-        assert result.returncode == 0, (result.stdout, result.stderr)
-        lines = output.read_text(encoding="utf-8").splitlines()
-        assert len(lines) == 2, lines
-        full_key, _, full_value = lines[0].partition("=")
-        matrix_key, _, matrix_value = lines[1].partition("=")
-        assert (full_key, matrix_key) == ("full", "matrix"), lines
-        return full_value, json.loads(matrix_value)
+        outputs = _decide(tmp_path, release=release, full=full, approval=approval)
+        return outputs["full"], json.loads(outputs["matrix"])
 
     @pytest.mark.parametrize(("context", "kind"), EVENTS)
     def test_each_event_gets_its_matrix(self, tmp_path, context, kind):
@@ -820,6 +859,174 @@ class TestTheDecideStepScript:
         flag, matrix = self._outputs(tmp_path, release=release, full=full, approval=approval)
         assert matrix == _matrix(f"{kind}_MATRIX")
         assert flag == ("false" if kind == "QUICK" else "true")
+
+    @pytest.mark.parametrize(
+        ("release", "full", "approval", "kind"),
+        [
+            ("true", "true", "false", "RELEASE"),
+            ("false", "true", "false", "FULL"),
+            ("false", "true", "true", "FULL"),
+            ("false", "false", "true", "APPROVAL"),
+            ("false", "false", "false", "QUICK"),
+            ("yes", "yes", "yes", "QUICK"),
+            ("", "", "", "QUICK"),
+        ],
+    )
+    def test_the_stack_travels_with_the_matrix(self, tmp_path, release, full, approval, kind):
+        """One chain picks both, so the two cannot disagree: no seven-cell run on the
+        pinned stack, and no pull-request cell that resolves the newest release."""
+        outputs = _decide(tmp_path, release=release, full=full, approval=approval)
+        assert json.loads(outputs["matrix"]) == _matrix(f"{kind}_MATRIX")
+        assert outputs["constraints"] == (
+            f"-c {PINNED_CONSTRAINTS}" if kind in PINNED_KINDS else ""
+        )
+
+
+def _constraint_files(command: str) -> list[str]:
+    """The files a ``pip`` command line constrains itself with, in order.
+
+    Read as the shell reads it: a ``-c`` behind a ``#`` is a comment, not a constraint.
+    """
+    args = shlex.split(command, comments=True)
+    files = []
+    for index, arg in enumerate(args):
+        if arg in ("-c", "--constraint"):
+            assert index + 1 < len(args), f"`{arg}` with no file: {command!r}"
+            files.append(args[index + 1])
+        elif arg.startswith("--constraint="):
+            files.append(arg.split("=", 1)[1])
+        elif re.fullmatch(r"-c[^-\s]\S*", arg):
+            files.append(arg[2:])
+    return files
+
+
+#: ``pip install`` of the project itself: ``-e .`` or ``-e ".[extra, ...]"``.
+_PROJECT_INSTALL = re.compile(r"""\bpip install\b[^\n]*?-e\s+["']?\.(?=[\["'\s]|$)""")
+
+
+def _project_installs(job: dict[str, Any]) -> list[str]:
+    """The ``run`` of every step of *job* that installs the project."""
+    runs = [str(step.get("run", "")) for step in job.get("steps", [])]
+    return [run for run in runs if _PROJECT_INSTALL.search(run)]
+
+
+def _install_command(job: str, constraints: str) -> str:
+    """The one command of *job* that installs the project, as the runner executes it
+    when ``plan`` has output *constraints*."""
+    runs = _project_installs(_jobs()[job])
+    assert len(runs) == 1, (job, runs)
+    return _render(runs[0], {"needs": {"plan": {"outputs": {"constraints": constraints}}}})
+
+
+def _environments(workflow: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every ``env:`` mapping of a workflow: its own, each job's and each step's."""
+    found = [workflow.get("env") or {}]
+    for job in workflow["jobs"].values():
+        found.append(job.get("env") or {})
+        found.extend(step.get("env") or {} for step in job.get("steps", []))
+    return found
+
+
+class TestPinnedUpstream:
+    """Pull-request runs and pushes to ``main`` install the pinned upstream stack; the
+    nightly run, a manual dispatch, ``release/**`` and the weekly drift job resolve the
+    newest. Read off the parsed workflow and the rendered commands, never off the text:
+    a comment that names the constraints file satisfies nothing here."""
+
+    def test_the_readers_have_teeth(self):
+        """CONTROL for every test of this class."""
+        assert _constraint_files('pip install -e ".[dev]" "pytest-xdist[psutil]"') == []
+        assert _constraint_files('pip install -e ".[dev]" "torch>=2.6.0" ') == []
+        assert _constraint_files("pip install -e . -c a.txt --constraint b.txt") == [
+            "a.txt",
+            "b.txt",
+        ]
+        assert _constraint_files("pip install --constraint=a.txt -cb.txt -e .") == [
+            "a.txt",
+            "b.txt",
+        ]
+        assert _constraint_files("pip install -e .  # -c a.txt") == []
+        with pytest.raises(AssertionError, match="with no file"):
+            _constraint_files("pip install -e . -c")
+        for run in (
+            'pip install -e ".[dev]" "pytest-xdist[psutil]"',
+            "pip install -e '.[mlx]' pytest",
+            "python -m pip install --upgrade pip\npip install -e .\n",
+            "pip install -e . --no-deps",
+        ):
+            assert _project_installs({"steps": [{"run": run}]}) == [run], run
+        others = ["pip install ruff", "pip install mypy", "pip install -e ./vendor/x", "pytest"]
+        steps = [{"uses": "actions/checkout@v4"}, *({"run": run} for run in others)]
+        assert _project_installs({"steps": steps}) == []
+
+    def test_plan_declares_the_constraints_file_and_no_step_names_it(self):
+        """The path is written once, in `plan`. A step that names the file itself installs
+        under it on every run, the nightly one included."""
+        assert (_plan().get("env") or {}).get("PINNED_CONSTRAINTS") == PINNED_CONSTRAINTS
+        assert (ROOT / PINNED_CONSTRAINTS).is_file()
+        for name, job in _jobs().items():
+            for step in job.get("steps", []):
+                assert PINNED_CONSTRAINTS not in str(step.get("run", "")), (name, step)
+
+    @NEEDS_BASH
+    @pytest.mark.parametrize(("context", "kind"), EVENTS)
+    def test_each_event_installs_the_pinned_stack_or_the_newest(self, tmp_path, context, kind):
+        """End to end: the event, through GitHub's expressions and the step's shell, into
+        the pip command of every job that installs the project."""
+        outputs = _decide(
+            tmp_path,
+            release=_release_for(context),
+            full=_full_for(context),
+            approval=_approval_for(context),
+        )
+        pinned = kind in PINNED_KINDS
+        assert outputs["constraints"] == (f"-c {PINNED_CONSTRAINTS}" if pinned else "")
+        expected = [PINNED_CONSTRAINTS] if pinned else []
+        for job in SWITCHED_JOBS:
+            command = _install_command(job, outputs["constraints"])
+            assert _constraint_files(command) == expected, (job, command)
+
+    @pytest.mark.parametrize("job", SWITCHED_JOBS)
+    def test_a_job_installs_under_what_plan_chose_and_nothing_else(self, job):
+        """The same, without the shell. With nothing chosen the command has no
+        constraints at all: a `-c` of the step's own would pin the nightly run too."""
+        assert "plan" in _needs(_jobs()[job])
+        pinned = _install_command(job, f"-c {PINNED_CONSTRAINTS}")
+        assert _constraint_files(pinned) == [PINNED_CONSTRAINTS], pinned
+        newest = _install_command(job, "")
+        assert _constraint_files(newest) == [], newest
+        assert shlex.split(newest)[:2] == ["pip", "install"], newest
+
+    def test_the_floor_job_installs_under_its_own_floor_on_every_run(self):
+        """Its purpose is the lower bound. The pinned stack is near the upper one."""
+        (run,) = _project_installs(_jobs()[FLOOR_JOB])
+        assert CONSTRAINTS_OUTPUT not in run
+        for chosen in (f"-c {PINNED_CONSTRAINTS}", ""):
+            assert _constraint_files(_install_command(FLOOR_JOB, chosen)) == [FLOOR_CONSTRAINTS]
+
+    def test_every_job_that_installs_the_project_is_switched_or_is_the_floor(self):
+        """A new job that installs `.[dev]` on its own resolves the newest release on
+        every pull request, which is the failure this switch removed."""
+        installing = {name for name, job in _jobs().items() if _project_installs(job)}
+        assert installing == {*SWITCHED_JOBS, FLOOR_JOB}
+
+    def test_no_environment_variable_constrains_a_job_behind_its_command_line(self):
+        """`PIP_CONSTRAINT` in an `env:` applies to every pip of that job on every run,
+        and shows on no command line."""
+        for environment in _environments(_workflow()):
+            assert "PIP_CONSTRAINT" not in {str(key).upper() for key in environment}
+
+    def test_the_weekly_drift_job_installs_with_no_constraints(self):
+        """It exists to meet the newest release. Pinned, it would report the pins."""
+        workflow = yaml.safe_load(DRIFT.read_text(encoding="utf-8"))
+        installs = [
+            run for job in workflow["jobs"].values() for run in _project_installs(job)
+        ]
+        assert len(installs) == 1, installs
+        assert _constraint_files(installs[0]) == [], installs[0]
+        assert CONSTRAINTS_OUTPUT not in installs[0]
+        for environment in _environments(workflow):
+            assert "PIP_CONSTRAINT" not in {str(key).upper() for key in environment}
 
 
 class TestADraftRunsNothing:
