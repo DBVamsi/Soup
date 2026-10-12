@@ -37,7 +37,7 @@
 - [Standalone Sweep Config](#standalone-sweep-config)
 - [Alternative Model Hubs (ModelScope / Modelers)](#alternative-model-hubs-modelscope--modelers)
 - [Experiment Trackers (MLflow / SwanLab / Trackio)](#experiment-trackers-mlflow--swanlab--trackio)
-- [Telemetry (opt-IN, hardware-info-only)](#telemetry-opt-in-hardware-info-only)
+- [Telemetry (opt-in)](#telemetry-opt-in)
 - [Plugin System](#plugin-system)
 - [External Integrations Catalog](#external-integrations-catalog)
 - [Advanced Trainer Plugins](#advanced-trainer-plugins)
@@ -1193,7 +1193,7 @@ soup completions zsh > "${fpath[1]}/_soup"
 soup completions fish > ~/.config/fish/completions/soup.fish
 ```
 
-Recipe names auto-complete from the 115+ catalogue; `--target-modules` falls back to canonical Llama-shape defaults (`q_proj` / `k_proj` / `v_proj` / etc.). Live HF-config introspection per `base` lands in v0.64.1.
+Command names and option names complete, straight from the live command tree: `rec` + Tab gives `recipes`, and after `soup train`, `--res` + Tab gives `--resume`. Values do not complete yet — recipe names after `soup recipes show`, for instance — because no option or argument is wired to a value completer. Two are ready for that wiring in `soup_cli/utils/completions.py`: `complete_recipe_name`, and `complete_target_modules`, which since v0.71.1 looks the base model's architecture up in its Hugging Face config when that config is already in the local cache (config only, never a download) and offers that architecture's module names, falling back to the canonical Llama-shape defaults (`q_proj` / `k_proj` / `v_proj` / etc.).
 
 
 ## License Advisor (`soup license-advisor`)
