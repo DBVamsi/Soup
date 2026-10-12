@@ -5,22 +5,32 @@ is pinned here:
 
 - ``parse_source`` hands back the tree ``ast.parse`` builds, and is keyed on the TEXT, so a
   file that changed on disk can not be served stale;
+- by default it remembers only the last two texts, so a guard that walks a whole tree never
+  holds that tree; ``keep=True`` is the explicit way to hold one;
 - ``walk_nodes`` is ``ast.walk`` node for node, in the same order;
 - ``memoized_scan`` runs a scanner once per input and never lets one caller's edit reach the
   next caller;
-- everything is dropped when a test module finishes (``tests/conftest.py``), because the
-  parsed trees of ``src/soup_cli`` alone are about 250 MB.
+- everything is dropped when a test module finishes (``tests/conftest.py``), and "dropped"
+  means the trees are freed, not merely unreachable from the cache.
 """
 
 from __future__ import annotations
 
 import ast
+import gc
 import textwrap
+import weakref
 from pathlib import Path
 
 import pytest
 
-from tests._source_scan import memoized_scan, parse_source, release, walk_nodes
+from tests._source_scan import (
+    RECENT_LIMIT,
+    memoized_scan,
+    parse_source,
+    release,
+    walk_nodes,
+)
 
 TESTS = Path(__file__).resolve().parent
 SRC = TESTS.parent / "src" / "soup_cli"
@@ -126,6 +136,40 @@ class TestParseSource:
 
         assert [node.targets[0].id for node in before.body] == ["alpha"]
         assert [node.targets[0].id for node in after.body] == ["omega"]
+
+    def test_only_the_last_texts_are_remembered_by_default(self) -> None:
+        """A guard that walks a whole tree through ``parse_source`` must not end up holding it.
+
+        Holding every tree of ``tests/`` is 551 MB of private bytes, and 524 MB of it stays
+        with the worker after ``release()``.
+        """
+        first = parse_source("first = 1\n")
+        walk_nodes(first)
+        alive = weakref.ref(first)
+        del first
+        for index in range(RECENT_LIMIT):
+            assert alive() is not None, "still one of the last texts parsed"
+            parse_source(f"other_{index} = 1\n")
+        gc.collect()
+        assert alive() is None, "a tree that fell out of the last texts must be freed"
+
+    def test_keep_holds_a_tree_until_release(self) -> None:
+        kept = parse_source("kept = 1\n", keep=True)
+        nodes = walk_nodes(kept)
+        for index in range(RECENT_LIMIT + 1):
+            parse_source(f"other_{index} = 1\n")
+        assert parse_source("kept = 1\n") is kept
+        assert parse_source("kept = 1\n", keep=True) is kept
+        assert walk_nodes(kept) is nodes
+
+    def test_keep_adopts_a_tree_already_parsed(self) -> None:
+        recent = parse_source("adopted = 1\n")
+        nodes = walk_nodes(recent)
+        assert parse_source("adopted = 1\n", keep=True) is recent
+        for index in range(RECENT_LIMIT + 1):
+            parse_source(f"other_{index} = 1\n")
+        assert parse_source("adopted = 1\n") is recent
+        assert walk_nodes(recent) is nodes
 
     def test_a_syntax_error_is_raised_every_time(self) -> None:
         with pytest.raises(SyntaxError) as direct:
@@ -251,6 +295,12 @@ class TestMemoizedScan:
 
 class TestRelease:
     def test_release_drops_trees_walks_and_memos(self) -> None:
+        """ "Dropped" is checked with weak references: the trees have to die.
+
+        Identity alone cannot see a cache that forgot the text and still holds the tree in
+        its second map. That mutation (``release()`` without ``_BY_TREE.clear()``) passed
+        the first version of this test, with every tree of the module still alive.
+        """
         calls: list[str] = []
 
         @memoized_scan
@@ -258,26 +308,34 @@ class TestRelease:
             calls.append(source)
             return [source]
 
-        tree = parse_source("value = 1\n")
-        nodes = walk_nodes(tree)
+        kept = parse_source("kept = 1\n", keep=True)
+        recent = parse_source("recent = 1\n")
+        kept_nodes, recent_nodes = walk_nodes(kept), walk_nodes(recent)
+        # [1] is the Assign statement. Not [-1]: that is ast.Store(), one shared object.
+        alive = [weakref.ref(node) for node in (kept, recent, kept_nodes[1], recent_nodes[1])]
         scan("x")
 
         release()
 
-        fresh = parse_source("value = 1\n")
-        assert fresh is not tree
-        assert walk_nodes(fresh) is not nodes
+        assert parse_source("kept = 1\n", keep=True) is not kept
+        assert parse_source("recent = 1\n") is not recent
         scan("x")
         assert calls == ["x", "x"]
+
+        del kept, recent, kept_nodes, recent_nodes
+        gc.collect()
+        assert [ref() for ref in alive] == [None] * 4, (
+            "release() must free the trees it held, not only forget their text"
+        )
 
     def test_every_test_module_releases_when_it_finishes(
         self, request: pytest.FixtureRequest
     ) -> None:
         """The wiring in ``tests/conftest.py``: autouse, module-scoped, releases after the yield.
 
-        Without it the trees a guard parsed stay alive for the rest of the worker: about 250 MB
-        for ``src/soup_cli`` and 280 MB for ``tests/``, and every later ``gc.collect()`` in that
-        worker walks them (0.6 ms -> 230 ms, measured on the dev box).
+        Without it the trees a guard kept stay alive for the rest of the worker (283 MB of
+        private bytes for ``src/soup_cli``), and every later ``gc.collect()`` in that worker
+        walks them (0.6 ms -> 230 ms, measured on the dev box).
         """
         assert "_release_scanned_sources" in request.fixturenames, (
             "the release fixture must be autouse: this test did not ask for it"

@@ -190,9 +190,9 @@ def _restore_working_directory():
 def _release_scanned_sources():
     """Drop what a source-scanning guard parsed once its module is done.
 
-    ``tests/_source_scan.py`` keeps the parsed trees of the files a guard walked so that
-    the module's next test does not parse them again. They are about 250 MB for
-    ``src/soup_cli`` and 280 MB for ``tests/``, and while they are alive every
+    ``tests/_source_scan.py`` lets a guard keep the parsed trees of the files it walked,
+    so that the module's next test does not parse them again. Every tree of
+    ``src/soup_cli`` is 283 MB of private bytes, and while they are alive every
     ``gc.collect()`` in the worker walks them, so they go when the module goes.
     """
     yield
