@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import _source_scan
+
 #: The skip message for a ``gpu``-marked test on a machine without CUDA (#833).
 GPU_SKIP_REASON = "needs a CUDA device (run the GPU subset with: pytest -m gpu --no-cov)"
 
@@ -182,6 +184,19 @@ def _restore_working_directory():
     before = os.getcwd()
     yield
     os.chdir(before)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _release_scanned_sources():
+    """Drop what a source-scanning guard parsed once its module is done.
+
+    ``tests/_source_scan.py`` keeps the parsed trees of the files a guard walked so that
+    the module's next test does not parse them again. They are about 250 MB for
+    ``src/soup_cli`` and 280 MB for ``tests/``, and while they are alive every
+    ``gc.collect()`` in the worker walks them, so they go when the module goes.
+    """
+    yield
+    _source_scan.release()
 
 
 @pytest.fixture
