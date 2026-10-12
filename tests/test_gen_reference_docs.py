@@ -1,24 +1,36 @@
 """``scripts/gen_reference_docs.py``: the generated config and CLI reference pages.
 
-Three things are held here.
+Four things are held here.
 
-1. **The committed pages are what the generator renders today** (``--check``). CI runs
-   this on Python 3.10 and 3.12, on Linux, Windows and macOS, so every helper that keeps
-   the output identical across them is pinned on its own: the type spelling, the default
-   and constraint rendering, the cell escaping, the Rich-markup stripping.
-2. **Coverage is complete.** Every ``SoupConfig`` key is exactly one row, every
+1. **The committed pages state what the code does** (``--check-structure``): the same
+   keys with the same type, default and constraints, the same commands with the same
+   parameters. Wording is NOT compared, on purpose: a pull request that rewords a help
+   string or a description must not go red here. The byte-exact check (``--check``) is
+   a release-time one and runs only with ``SOUP_DOCS_EXACT=1``.
+2. **The render is the same everywhere.** CI runs this on Python 3.10 and 3.12, on
+   Linux, Windows and macOS, so every helper that keeps the output identical across
+   them is pinned on its own: the type spelling, the default and constraint rendering,
+   the cell escaping, the Rich-markup stripping.
+3. **Coverage is complete.** Every ``SoupConfig`` key is exactly one row, every
    registered command one section, every visible option and argument one row. The
    schema and the Click tree are walked HERE, independently of the generator's own
    walkers, so a walker that skips something cannot agree with itself.
-3. **Rendering is import-light.** ``conftest.py`` has already imported torch into the
+4. **Rendering is import-light.** ``conftest.py`` has already imported torch into the
    pytest process, so that part runs in a fresh interpreter, like
    ``tests/test_cli_startup_is_light.py``.
+
+Nothing below pins a value that lives in the schema or in a help string (a default, a
+bound, a sentence). Those change in ordinary pull requests, and this file must not be
+one more thing to edit then: shapes are pinned on the toy model and the toy apps, and
+what is asserted about the real pages is derived from the real schema and Click tree.
 """
 
 from __future__ import annotations
 
 import collections.abc
+import difflib
 import enum
+import json
 import os
 import re
 import subprocess
@@ -31,7 +43,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 import click
 import pytest
 import typer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from scripts import gen_reference_docs as gen
 
@@ -90,15 +102,46 @@ def _mirror(tmp_path: Path, rendered: dict[str, str]) -> None:
 
 
 # --------------------------------------------------------------------------
-# 1. --check: the committed pages are fresh, and the check can fail
+# 1. the committed pages: structure always, bytes at release
 # --------------------------------------------------------------------------
 
+_EXACT_REASON = (
+    "byte-exact freshness is a release-time check: maintainers set SOUP_DOCS_EXACT=1 when "
+    "they regenerate the reference pages for a release. Between releases only the structure "
+    "is held (test_the_committed_pages_state_what_the_code_does), so that rewording a help "
+    "string does not fail a pull request."
+)
 
-def test_check_passes_on_the_committed_pages(capsys: pytest.CaptureFixture[str]) -> None:
+
+def test_the_committed_pages_state_what_the_code_does(capsys: pytest.CaptureFixture[str]) -> None:
+    """The default freshness test. If it fails, the message names the keys or parameters
+    and the command to run; a wording-only change never fails it."""
+    code = gen.main(["--check-structure"])
+    out = _plain(capsys.readouterr().out)
+    assert code == 0, out
+    assert "state what the code does" in out, out
+
+
+@pytest.mark.skipif(os.environ.get("SOUP_DOCS_EXACT") != "1", reason=_EXACT_REASON)
+def test_the_committed_pages_are_byte_exact(capsys: pytest.CaptureFixture[str]) -> None:
     code = gen.main(["--check"])
     out = _plain(capsys.readouterr().out)
     assert code == 0, out
     assert "up to date" in out, out
+
+
+def test_the_exact_test_is_skipped_with_a_reason_a_contributor_can_act_on() -> None:
+    marks = [mark for mark in test_the_committed_pages_are_byte_exact.pytestmark]
+    assert [mark.name for mark in marks] == ["skipif"]
+    assert "SOUP_DOCS_EXACT=1" in marks[0].kwargs["reason"]
+    assert "release" in marks[0].kwargs["reason"]
+
+
+def test_the_two_checks_cannot_be_asked_for_together(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        gen.main(["--check", "--check-structure"])
+    assert stopped.value.code == 2
+    assert "not allowed with" in _plain(capsys.readouterr().err)
 
 
 def test_the_generator_renders_exactly_the_two_pages(pages: dict[str, str]) -> None:
@@ -126,7 +169,8 @@ def test_check_names_only_the_page_that_lost_a_row(
 
     page = tmp_path / gen.CONFIG_PAGE
     lines = page.read_bytes().decode("utf-8").splitlines(keepends=True)
-    victim = next(i for i, line in enumerate(lines) if line.startswith("| `base` |"))
+    victim = next(i for i, line in enumerate(lines) if line.startswith("| `"))
+    key = _cells(lines[victim])[0].strip("`")
     del lines[victim]
     page.write_bytes("".join(lines).encode("utf-8"))
     capsys.readouterr()
@@ -135,18 +179,28 @@ def test_check_names_only_the_page_that_lost_a_row(
     out = _plain(capsys.readouterr().out)
     assert "docs/config-reference.md is stale" in out, out
     assert "docs/cli-reference.md" not in out, out
-    assert "python scripts/gen_reference_docs.py" in out, out
+    assert out.endswith("Run `python scripts/gen_reference_docs.py` and commit the result."), out
     assert f"first difference at line {victim + 1}" in out, out
+
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert f"{key}: not on the page (type " in out, out
+    assert "docs/cli-reference.md" not in out, out
 
 
 def test_check_fails_when_the_schema_gains_a_field(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    pages: dict[str, str],
 ) -> None:
     from soup_cli.config.schema import SoupConfig
 
     class Grown(SoupConfig):
         brand_new_knob: int = Field(default=7, ge=1, le=9, description="Not on the page yet.")
 
+    _mirror(tmp_path, pages)
+    monkeypatch.setattr(gen, "_REPO_ROOT", tmp_path)
     monkeypatch.setattr(gen, "_load_config_model", lambda: Grown)
 
     assert gen.main(["--check"]) == 1
@@ -154,21 +208,41 @@ def test_check_fails_when_the_schema_gains_a_field(
     assert "docs/config-reference.md is stale" in out, out
     assert "docs/cli-reference.md" not in out, out
 
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/config-reference.md no longer matches the schema (1 difference)" in out, out
+    assert "brand_new_knob: not on the page (type `int`, default `7`" in out, out
+    assert "docs/cli-reference.md" not in out, out
+
 
 def test_check_fails_when_a_command_gains_an_option(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    pages: dict[str, str],
 ) -> None:
-    from soup_cli.cli import app
-
-    root = typer.main.get_command(app)
-    root.commands["version"].params.append(
-        click.Option(["--brand-new-flag"], is_flag=True, help="Not on the page yet.")
+    root = _live_root()
+    title, command = next(
+        (title, cmd)
+        for title, cmd in _command_tree(root).items()
+        if not isinstance(cmd, click.Group) and _visible(cmd)
     )
+    command.params.append(
+        click.Option(["--brand-new-flag"], is_flag=True, default=False, help="Not yet.")
+    )
+    _mirror(tmp_path, pages)
+    monkeypatch.setattr(gen, "_REPO_ROOT", tmp_path)
     monkeypatch.setattr(gen, "_load_cli_root", lambda: root)
 
     assert gen.main(["--check"]) == 1
     out = _plain(capsys.readouterr().out)
     assert "docs/cli-reference.md is stale" in out, out
+    assert "docs/config-reference.md" not in out, out
+
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/cli-reference.md no longer matches the CLI (1 difference)" in out, out
+    assert f"{title} --brand-new-flag: not on the page (type flag, default off" in out, out
     assert "docs/config-reference.md" not in out, out
 
 
@@ -181,7 +255,13 @@ def test_check_reports_a_page_that_does_not_exist(
     out = _plain(capsys.readouterr().out)
     assert "docs/config-reference.md is missing" in out, out
     assert "docs/cli-reference.md is missing" in out, out
-    assert not (tmp_path / "docs").exists(), "--check must not write anything"
+
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/config-reference.md no longer matches the schema (1 difference)" in out, out
+    assert "docs/cli-reference.md no longer matches the CLI (1 difference)" in out, out
+    assert out.count("the page is missing") == 2, out
+    assert not (tmp_path / "docs").exists(), "a check must not write anything"
 
 
 def test_writing_produces_lf_utf8_pages_that_then_pass_the_check(
@@ -218,11 +298,14 @@ def test_check_reads_a_crlf_checkout_as_the_same_page(
     monkeypatch.setattr(gen, "_REPO_ROOT", tmp_path)
 
     assert gen.stale_pages(tmp_path, pages) == []
+    assert gen.structure_drift(tmp_path, pages) == {}
     assert gen.main(["--check"]) == 0
+    assert gen.main(["--check-structure"]) == 0
 
 
+@pytest.mark.parametrize("mode", ["--check", "--check-structure"])
 def test_a_shadowing_install_is_refused_by_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: str
 ) -> None:
     """A same-version copy of ``soup_cli`` in site-packages shadows the working tree;
     pages rendered from it would describe other code and still look plausible."""
@@ -231,7 +314,7 @@ def test_a_shadowing_install_is_refused_by_name(
     elsewhere = tmp_path / "site-packages" / "soup_cli" / "__init__.py"
     monkeypatch.setattr(soup_cli, "__file__", str(elsewhere))
 
-    assert gen.main(["--check"]) == 2
+    assert gen.main([mode]) == 2
     out = _plain(capsys.readouterr().out)
     assert "soup_cli is imported from" in out, out
     assert "site-packages" in out, out
@@ -250,28 +333,30 @@ def _is_model(annotation: Any) -> bool:
     )
 
 
-def _schema_paths(model: type[BaseModel], prefix: str = "") -> tuple[list[str], list[str]]:
-    """(every field path, every path that is a nested model), walked here on purpose."""
-    paths: list[str] = []
-    sections: list[str] = []
+def _schema_fields(model: type[BaseModel], prefix: str = "") -> list[tuple[str, Any, bool]]:
+    """``(path, FieldInfo, is a nested model)`` for every field, walked here on purpose."""
+    fields: list[tuple[str, Any, bool]] = []
     for name, info in model.model_fields.items():
         path = f"{prefix}{name}"
-        paths.append(path)
-        for member in (info.annotation, *typing.get_args(info.annotation)):
-            if _is_model(member):
-                sections.append(path)
-                sub_paths, sub_sections = _schema_paths(member, f"{path}.")
-                paths.extend(sub_paths)
-                sections.extend(sub_sections)
-    return paths, sections
+        nested = [m for m in (info.annotation, *typing.get_args(info.annotation)) if _is_model(m)]
+        fields.append((path, info, bool(nested)))
+        for member in nested:
+            fields.extend(_schema_fields(member, f"{path}."))
+    return fields
+
+
+def _schema_paths(model: type[BaseModel]) -> tuple[list[str], list[str]]:
+    """(every field path, every path that is a nested model)."""
+    fields = _schema_fields(model)
+    return [path for path, _, _ in fields], [path for path, _, nested in fields if nested]
 
 
 def test_every_config_field_is_exactly_one_row(config_page: str) -> None:
     from soup_cli.config.schema import SoupConfig
 
     paths, sections = _schema_paths(SoupConfig)
-    assert len(paths) >= 300, len(paths)  # 326 on 2026-10-12
-    assert {"training.lora", "training.eval_gate", "eval.ship"} <= set(sections), sections
+    assert len(paths) >= 300, len(paths)
+    assert "training.lora" in sections, sections
 
     rendered = Counter(_CONFIG_ROW_KEY.findall(config_page))
     assert set(rendered) == set(paths), (
@@ -279,7 +364,6 @@ def test_every_config_field_is_exactly_one_row(config_page: str) -> None:
         sorted(set(rendered) - set(paths)),
     )
     assert [key for key, count in rendered.items() if count != 1] == []
-    assert f"{len(paths)} keys" in config_page
 
 
 def test_every_nested_model_is_a_section_named_by_its_yaml_path(config_page: str) -> None:
@@ -288,26 +372,34 @@ def test_every_nested_model_is_a_section_named_by_its_yaml_path(config_page: str
     _, sections = _schema_paths(SoupConfig)
     headings = [line for line in config_page.splitlines() if line.startswith("## ")]
     assert headings == ["## Top-level keys", *(f"## `{path}`" for path in sections)]
+    listed = re.findall(r"^- \[`?([^`\]]+)`?\]\(#", config_page, re.MULTILINE)
+    assert listed == ["Top-level keys", *sections], "one line per section in the header list"
 
 
-def test_rows_carry_type_default_bounds_and_choices(config_page: str) -> None:
-    rows = {cells[0]: cells for cells in _rows(config_page.splitlines()) if len(cells) == 5}
+def test_every_row_states_its_own_fields_default_and_bounds(config_page: str) -> None:
+    """Every scalar default and every bound of the real schema, recomputed here from the
+    ``FieldInfo`` with ``json.dumps`` / ``repr`` rather than the generator's formatters.
+    Derived, not pinned: changing a default in the schema never needs an edit here."""
+    from soup_cli.config.schema import SoupConfig
 
-    assert rows["`base`"][1:3] == ["`str`", "**required**"]
-    assert rows["`data`"][1:3] == ["`section`", "**required**"]
-    assert rows["`data.train`"][1:3] == ["`str \\| list[str]`", "**required**"]
-    assert rows["`task`"][1:3] == ["`str`", '`"sft"`']
-    assert '`"dpo"`' in rows["`task`"][3] and rows["`task`"][3].startswith("one of ")
-    assert rows["`training.batch_size`"][1:4] == ['`int \\| "auto"`', '`"auto"`', ""]
-    assert rows["`training.lora`"][1:3] == ["`section`", "section defaults"]
-    assert "[`training.lora`](#traininglora)" in rows["`training.lora`"][4]
-    assert rows["`training.eval_gate`"][1:3] == ["`section \\| null`", "`null`"]
-    assert rows["`training.reward_hack_signals`"][1:4] == [
-        "`list[str]`",
-        '`["info_rm"]`',
-        "max length 4",
-    ]
-    assert rows["`training.lora.r`"][1:4] == ["`int`", "`64`", "`>= 0`"]
+    stated = gen.parse_config_page(config_page)
+    scalars = bounds = required = 0
+    for path, info, nested in _schema_fields(SoupConfig):
+        cells = stated[path]
+        if info.is_required():
+            required += 1
+            assert cells["default"] == "**required**", path
+        elif info.default_factory is None and not nested and cells["default"].startswith("`"):
+            scalars += 1  # a code cell: "(set at runtime)", were one ever needed, is not
+            literal = json.dumps(info.default, ensure_ascii=False)
+            assert cells["default"].replace("\\|", "|") == f"`{literal}`", path
+        for meta in info.metadata:
+            for attr, sign in (("gt", ">"), ("ge", ">="), ("lt", "<"), ("le", "<=")):
+                bound = getattr(meta, attr, None)
+                if bound is not None:
+                    bounds += 1
+                    assert f"`{sign} {bound!r}`" in cells["constraints"], (path, cells)
+    assert required >= 1 and scalars >= 250 and bounds >= 100, (required, scalars, bounds)
 
 
 def test_a_field_added_to_the_schema_gets_a_full_row() -> None:
@@ -436,15 +528,14 @@ def _row_names(row: list[str]) -> set[str]:
 def test_every_registered_command_has_exactly_one_section(cli_page: str) -> None:
     tree = _command_tree(_live_root())
     leaves = [title for title, cmd in tree.items() if not isinstance(cmd, click.Group)]
-    assert len(leaves) >= 200, len(leaves)  # 219 on 2026-10-12
-    assert {"soup eval against", "soup llama quantize", "soup mcp runs reconcile"} <= set(leaves)
+    assert len(leaves) >= 200, len(leaves)
+    assert max(title.count(" ") for title in leaves) >= 3, "a command three names deep"
 
     sections = _cli_sections(cli_page)
     assert sorted(sections) == sorted(tree), (
         sorted(set(tree) - set(sections)),
         sorted(set(sections) - set(tree)),
     )
-    assert f"{len(leaves)} commands" in cli_page
 
 
 def test_every_visible_option_and_argument_is_one_row_of_its_command(cli_page: str) -> None:
@@ -466,7 +557,7 @@ def test_every_visible_option_and_argument_is_one_row_of_its_command(cli_page: s
                 assert row[0] in (f"`{shown}`", f"`{shown}...`"), (title, row[0])
                 assert row[4], f"{title} {shown}: every argument declares its help"
             assert row[3] == ("yes" if param.required else ""), (title, row)
-    assert options >= 1000, options  # 1031 below the root on 2026-10-12
+    assert options >= 1000, options
     assert arguments >= 100, arguments
 
 
@@ -477,10 +568,10 @@ def test_the_global_options_are_listed_before_the_commands(cli_page: str) -> Non
     assert start < end
     rows = _rows(lines[start:end])
     root_params = _visible(_live_root())
+    assert root_params, "the root has options of its own"
     assert [_row_names(row) for row in rows] == [
         {*param.opts, *param.secondary_opts} for param in root_params
     ]
-    assert {"--verbose", "-V"} in [_row_names(row) for row in rows]
 
 
 def test_the_commands_index_links_every_top_level_command(cli_page: str) -> None:
@@ -492,6 +583,61 @@ def test_the_commands_index_links_every_top_level_command(cli_page: str) -> None
     top = sorted(name for name, cmd in root.commands.items() if not cmd.hidden)
     assert [title for title, _ in linked] == [f"soup {name}" for name in top]
     assert all(anchor == title.replace(" ", "-") for title, anchor in linked), linked[:3]
+
+
+def _declared_argument_help(cmd: click.Command) -> dict[str, str]:
+    """Argument help as declared to Typer: Click 8.5 drops it from the Click object."""
+    from typer.models import ArgumentInfo
+    from typer.utils import get_params_from_function
+
+    if cmd.callback is None:
+        return {}
+    return {
+        name: meta.default.help
+        for name, meta in get_params_from_function(cmd.callback).items()
+        if isinstance(meta.default, ArgumentInfo) and meta.default.help
+    }
+
+
+def _help_strings(root: click.Group) -> list[tuple[str, str]]:
+    """``(where, text)`` for every command help and parameter help of the live CLI."""
+    found: list[tuple[str, str]] = []
+    for title, cmd in {"soup": root, **_command_tree(root)}.items():
+        found.append((title, cmd.help or ""))
+        declared = _declared_argument_help(cmd)
+        for param in cmd.params:
+            text = getattr(param, "help", None) or declared.get(param.name, "")
+            found.append((f"{title} {param.name}", text))
+    return found
+
+
+def test_every_command_a_help_string_or_a_description_names_is_registered() -> None:
+    """``soup eval against`` told its reader to take the run id "from `soup runs list`",
+    a subcommand that does not exist (``soup runs`` lists them). The docs guard (#1465)
+    reads the committed pages, whose wording may trail the code, so every `` `soup ...` ``
+    span is resolved here at its source: command help, parameter help, field description.
+    """
+    from soup_cli.config.schema import SoupConfig
+    from tests.test_issue1465_documented_invocations_exist import check_invocation
+
+    root = _live_root()
+    texts = _help_strings(root) + [
+        (path, info.description or "") for path, info, _ in _schema_fields(SoupConfig)
+    ]
+    spans = [
+        (where, span) for where, text in texts for span in re.findall(r"`(soup [^`\n]+)`", text)
+    ]
+    assert len(spans) >= 20, len(spans)
+    assert any(where.count(" ") >= 2 for where, _ in spans), "parameter help is read too"
+
+    problems = [
+        (where, span, reason)
+        for where, span in spans
+        for reason in [check_invocation(span, root)]
+        if reason is not None
+    ]
+    assert problems == []
+    assert check_invocation("soup runs list", root) is not None, "the control"
 
 
 class _Colour(str, enum.Enum):
@@ -571,7 +717,8 @@ def test_a_toy_app_renders_every_kind_of_parameter() -> None:
     assert rows["`--when`"][1] == "*(set at runtime)*"
     assert os.getcwd() not in page
 
-    assert "Subcommands: [`clean`](#soup-oven-clean)" in sections["soup oven"]
+    oven = sections["soup oven"]
+    assert oven[oven.index("Subcommands:") + 2] == "- [`clean`](#soup-oven-clean)", oven
     assert "Takes no options or arguments." in sections["soup oven clean"]
     assert "| `--verbose`, `-V` | flag | off |  | Say more. |" in page
 
@@ -631,9 +778,10 @@ def test_a_plain_click_tree_renders_the_remaining_parameter_shapes() -> None:
     assert rows["`--keep`"][:2] == ["text, repeatable", '`["x", "y"]`']
 
 
-def test_argument_help_reads_the_same_whether_or_not_click_kept_it(cli_page: str) -> None:
+def test_argument_help_reads_the_same_whether_or_not_click_kept_it() -> None:
     """Click 8.5 resets the ``help`` Typer 0.20 sets on an argument; older Click keeps
-    it. The page must not change with the Click that happens to be installed."""
+    it. The page must not change with the Click that happens to be installed. (That
+    every argument of the real CLI has a help cell is held by the coverage test.)"""
     declared = {"recipe": "Recipe [bold]name[/bold].", "extras": "Extra toppings."}
     kept, reset = _toy_root(), _toy_root()
     for root, value in ((kept, declared), (reset, {})):
@@ -643,7 +791,6 @@ def test_argument_help_reads_the_same_whether_or_not_click_kept_it(cli_page: str
 
     assert gen.render_cli_reference(kept) == gen.render_cli_reference(reset)
     assert "| `RECIPE` | text |  | yes | Recipe name. |" in gen.render_cli_reference(reset)
-    assert "| `PATH` | text |  | yes | Path to dataset file (jsonl, csv, parquet) |" in cli_page
 
 
 def test_typer_completion_options_do_not_depend_on_shell_detection(
@@ -671,6 +818,375 @@ def test_rendering_ignores_the_terminal(
 
 
 # --------------------------------------------------------------------------
+# 1c. --check-structure, on a toy schema and a toy CLI
+# --------------------------------------------------------------------------
+
+_RUN_THIS = "Run `python scripts/gen_reference_docs.py` and commit the result."
+
+
+@pytest.fixture
+def toy_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A scratch repo whose two pages are the toy model's and the toy app's, with the
+    generator pointed at both. Each structure test then changes exactly one thing."""
+    _mirror(
+        tmp_path,
+        {
+            gen.CONFIG_PAGE: gen.render_config_reference(_Toy),
+            gen.CLI_PAGE: gen.render_cli_reference(_toy_root()),
+        },
+    )
+    monkeypatch.setattr(gen, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(gen, "_load_config_model", lambda: _Toy)
+    monkeypatch.setattr(gen, "_load_cli_root", _toy_root)
+    return tmp_path
+
+
+def _toy_with(**fields: Any) -> type[BaseModel]:
+    """The toy model with fields added, or redeclared in place."""
+    return create_model("ToyVariant", __base__=_Toy, **fields)
+
+
+class _DeeperInner(BaseModel):
+    depth: int = Field(default=3, ge=1, le=8, description="How deep.")
+
+
+def _param(root: click.Command, command: str, name: str) -> click.Parameter:
+    target = root.commands[command] if command else root
+    return next(param for param in target.params if param.name == name)
+
+
+def _toy_root_after(*mutations: Any) -> click.Command:
+    root = _toy_root()
+    for mutate in mutations:
+        mutate(root)
+    return root
+
+
+_SPEED = "Speed."
+_CONFIG_CHANGES: dict[str, tuple[Any, str]] = {
+    "default": (
+        lambda: _toy_with(
+            mode=(Literal["fast", "slow"], Field(default="slow", description=_SPEED))
+        ),
+        'mode: default `"fast"` -> `"slow"`',
+    ),
+    "default-removed": (
+        lambda: _toy_with(mode=(Literal["fast", "slow"], Field(description=_SPEED))),
+        'mode: default `"fast"` -> **required**',
+    ),
+    "type": (
+        lambda: _toy_with(code=(Optional[str], Field(default="x", pattern=r"^[a-z|]+$"))),
+        "code: type `str` -> `str | null`",
+    ),
+    "bound": (
+        lambda: _toy_with(
+            tags=(List[str], Field(default_factory=lambda: ["a"], min_length=1, max_length=8))
+        ),
+        "tags: constraints min length 1; max length 4 -> min length 1; max length 8",
+    ),
+    "choice": (
+        lambda: _toy_with(
+            mode=(Literal["fast", "slow", "turbo"], Field(default="fast", description=_SPEED))
+        ),
+        'mode: constraints one of `"fast"`, `"slow"` -> one of `"fast"`, `"slow"`, `"turbo"`',
+    ),
+    "nested-default": (
+        lambda: _toy_with(inner=(_DeeperInner, Field(default_factory=_DeeperInner))),
+        "inner.depth: default `2` -> `3`",
+    ),
+    "new-key": (
+        lambda: _toy_with(fresh_knob=(int, Field(default=7, ge=1, description="New."))),
+        "fresh_knob: not on the page (type `int`, default `7`, constraints `>= 1`)",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CONFIG_CHANGES))
+def test_a_changed_config_key_fails_structure_and_is_named(
+    toy_tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], case: str
+) -> None:
+    variant, expected = _CONFIG_CHANGES[case]
+    monkeypatch.setattr(gen, "_load_config_model", variant)
+
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/config-reference.md no longer matches the schema (1 difference):" in out, out
+    assert expected in out, out
+    assert "docs/cli-reference.md" not in out, out
+    assert out.endswith(_RUN_THIS), out
+    assert gen.main(["--check"]) == 1, "what structure refuses, the exact check refuses too"
+
+
+def test_a_key_that_left_the_schema_fails_structure_and_is_named(
+    toy_tree: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with_extra = gen.render_config_reference(_toy_with(fresh_knob=(int, Field(default=7))))
+    (toy_tree / gen.CONFIG_PAGE).write_bytes(with_extra.encode("utf-8"))
+
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/config-reference.md no longer matches the schema (1 difference):" in out, out
+    assert "fresh_knob: on the page, no longer in the schema" in out, out
+    assert out.endswith(_RUN_THIS), out
+
+
+def test_rewording_a_description_passes_structure_and_fails_exact(
+    toy_tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reworded = _toy_with(
+        mode=(Literal["fast", "slow"], Field(default="fast", description="How fast the run goes.")),
+        inner=(_Inner, Field(default_factory=_Inner, description="A nested block, reworded.")),
+    )
+    monkeypatch.setattr(gen, "_load_config_model", lambda: reworded)
+
+    assert gen.main(["--check-structure"]) == 0
+    assert "state what the code does" in _plain(capsys.readouterr().out)
+    assert gen.main(["--check"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/config-reference.md is stale" in out, out
+    assert "docs/cli-reference.md" not in out, out
+
+
+_FRESH_FLAG = click.Option(["--fresh-flag"], is_flag=True, default=False, help="New.")
+_CLI_CHANGES: dict[str, tuple[Any, str]] = {
+    "default": (
+        lambda root: setattr(_param(root, "bake", "heat"), "default", 5),
+        "soup bake --heat, -t: default `3` -> `5`",
+    ),
+    "required": (
+        lambda root: setattr(_param(root, "bake", "tag"), "required", True),
+        "soup bake --tag: required (empty) -> yes",
+    ),
+    "type": (
+        lambda root: setattr(_param(root, "bake", "heat"), "type", click.IntRange(1, 12)),
+        "soup bake --heat, -t: type integer, 1 to 9 -> integer, 1 to 12",
+    ),
+    "new-option": (
+        lambda root: root.commands["bake"].params.append(_FRESH_FLAG),
+        "soup bake --fresh-flag: not on the page (type flag, default off, required (empty))",
+    ),
+    "new-argument": (
+        lambda root: root.commands["oven"].commands["clean"].params.append(
+            click.Argument(["target"])
+        ),
+        "soup oven clean TARGET: not on the page (type text, default (empty), required yes)",
+    ),
+    "new-command": (
+        lambda root: root.commands.__setitem__("fresh", click.Command("fresh", help="New.")),
+        "soup fresh: command not on the page",
+    ),
+    "global-option": (
+        lambda root: setattr(_param(root, "", "verbose"), "default", True),
+        "soup --verbose, -V: default off -> on",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CLI_CHANGES))
+def test_a_changed_command_or_parameter_fails_structure_and_is_named(
+    toy_tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], case: str
+) -> None:
+    mutate, expected = _CLI_CHANGES[case]
+    monkeypatch.setattr(gen, "_load_cli_root", lambda: _toy_root_after(mutate))
+
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/cli-reference.md no longer matches the CLI (1 difference):" in out, out
+    assert expected in out, out
+    assert "docs/config-reference.md" not in out, out
+    assert out.endswith(_RUN_THIS), out
+    assert gen.main(["--check"]) == 1, "what structure refuses, the exact check refuses too"
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("new-option", "soup bake --fresh-flag: on the page, no longer in the CLI"),
+        ("new-command", "soup fresh: on the page, no longer a registered command"),
+    ],
+)
+def test_what_left_the_cli_fails_structure_and_is_named(
+    toy_tree: Path, capsys: pytest.CaptureFixture[str], case: str, expected: str
+) -> None:
+    with_extra = gen.render_cli_reference(_toy_root_after(_CLI_CHANGES[case][0]))
+    (toy_tree / gen.CLI_PAGE).write_bytes(with_extra.encode("utf-8"))
+
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/cli-reference.md no longer matches the CLI (1 difference):" in out, out
+    assert expected in out, out
+    assert out.endswith(_RUN_THIS), out
+
+
+def test_rewording_help_passes_structure_and_fails_exact(
+    toy_tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def reword(root: click.Command) -> None:
+        root.commands["bake"].help = "Bake something, said differently."
+        _param(root, "bake", "heat").help = "How hot, reworded."
+        _param(root, "", "verbose").help = "Say a lot more."
+
+    monkeypatch.setattr(gen, "_load_cli_root", lambda: _toy_root_after(reword))
+
+    assert gen.main(["--check-structure"]) == 0
+    assert "state what the code does" in _plain(capsys.readouterr().out)
+    assert gen.main(["--check"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/cli-reference.md is stale" in out, out
+    assert "docs/config-reference.md" not in out, out
+
+
+def test_structure_names_ten_differences_per_page_and_counts_the_rest(
+    toy_tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    knobs = {f"knob_{index:02d}": (int, Field(default=index)) for index in range(13)}
+    monkeypatch.setattr(gen, "_load_config_model", lambda: _toy_with(**knobs))
+    monkeypatch.setattr(gen, "_load_cli_root", lambda: _toy_root_after(_CLI_CHANGES["type"][0]))
+
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/config-reference.md no longer matches the schema (13 differences):" in out, out
+    assert out.count(": not on the page") == 10, out
+    assert "knob_09: not on the page" in out and "knob_10" not in out, out
+    # the count of what was not shown closes the first page's block
+    assert "... and 3 more docs/cli-reference.md no longer matches the CLI (1 difference):" in out
+    assert out.count(_RUN_THIS) == 1 and out.endswith(_RUN_THIS), out
+
+
+def test_split_row_keeps_an_escaped_pipe_inside_its_cell() -> None:
+    assert gen.split_row("| a | b |") == ["a", "b"]
+    assert gen.split_row("|---|---|") == ["---", "---"]
+    assert gen.split_row("| `x \\| y` | one \\| two |  | z |") == [
+        "`x \\| y`",
+        "one \\| two",
+        "",
+        "z",
+    ]
+    # an escaped backslash does not escape the delimiter after it
+    assert gen.split_row("| a\\\\| b |") == ["a\\\\", "b"]
+
+
+def test_the_parsers_read_back_what_the_renderers_stated() -> None:
+    config = gen.parse_config_page(gen.render_config_reference(_Toy))
+    assert list(config) == [
+        "name",
+        "mode",
+        "ratio",
+        "tags",
+        "stamp",
+        "workdir",
+        "code",
+        "inner",
+        "maybe",
+        "yamlName",
+        "inner.depth",
+        "maybe.depth",
+    ]
+    assert config["code"] == {
+        "type": "`str`",
+        "default": '`"x"`',
+        "constraints": "pattern `^[a-z\\|]+$`",
+    }
+    assert config["ratio"]["type"] == "`float \\| null`"
+    assert config["name"] == {"type": "`str`", "default": "**required**", "constraints": ""}
+
+    cli = gen.parse_cli_page(gen.render_cli_reference(_toy_root()))
+    assert list(cli) == ["soup", "soup bake", "soup oven", "soup oven clean"]
+    assert list(cli["soup"]) == ["--verbose, -V", "--install-completion", "--show-completion"]
+    assert cli["soup"]["--verbose, -V"] == {"type": "flag", "default": "off", "required": ""}
+    assert list(cli["soup bake"])[:3] == ["RECIPE", "EXTRAS...", "--heat, -t"]
+    assert cli["soup bake"]["RECIPE"] == {"type": "text", "default": "", "required": "yes"}
+    assert cli["soup bake"]["--dry-run / --wet-run"]["default"] == "on"
+    assert cli["soup oven"] == {} and cli["soup oven clean"] == {}
+
+
+def test_the_structure_parsers_read_every_row_of_the_real_pages(
+    config_page: str, cli_page: str
+) -> None:
+    """A parser that silently read nothing would let the structure check pass for ever."""
+    from soup_cli.config.schema import SoupConfig
+
+    paths, _ = _schema_paths(SoupConfig)
+    assert sorted(gen.parse_config_page(config_page)) == sorted(paths)
+
+    root = _live_root()
+    tree = _command_tree(root)
+    parsed = gen.parse_cli_page(cli_page)
+    assert set(parsed) == {"soup", *tree}
+    assert len(parsed["soup"]) == len(_visible(root))
+    for title, cmd in tree.items():
+        assert len(parsed[title]) == len(_visible(cmd)), title
+
+
+# --------------------------------------------------------------------------
+# 1d. one line per item: concurrent changes merge as text and stay right
+# --------------------------------------------------------------------------
+
+
+def _insertions(base: str, changed: str) -> dict[int, list[str]]:
+    """``{line index in base: lines inserted there}`` for a change that only adds lines;
+    fails when the change removes or rewrites a line that was already on the page."""
+    old, new = base.split("\n"), changed.split("\n")
+    found: dict[int, list[str]] = {}
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    for tag, old_start, old_stop, new_start, new_stop in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        assert tag == "insert", (tag, old[old_start:old_stop], new[new_start:new_stop])
+        found[old_start] = new[new_start:new_stop]
+    return found
+
+
+def _merged(base: str, *changes: str) -> str:
+    """The three-way text merge of changes that insert at different places."""
+    lines = base.split("\n")
+    inserted: dict[int, list[str]] = {}
+    for change in changes:
+        for index, added in _insertions(base, change).items():
+            assert index not in inserted, f"two changes insert at line {index + 1}"
+            inserted[index] = added
+    for index in sorted(inserted, reverse=True):
+        lines[index:index] = inserted[index]
+    return "\n".join(lines)
+
+
+def test_two_changes_that_each_add_a_key_merge_as_text_and_stay_right() -> None:
+    def page(*names: str) -> str:
+        fields = {name: (int, Field(default=len(name), description=name)) for name in names}
+        return gen.render_config_reference(create_model("Merged", **fields))
+
+    base = page("alpha", "beta", "gamma")
+    first = page("alpha", "one", "beta", "gamma")
+    second = page("alpha", "beta", "two", "gamma")
+    assert list(_insertions(base, first).values()) == [["| `one` | `int` | `3` |  | one |"]]
+    assert _merged(base, first, second) == page("alpha", "one", "beta", "two", "gamma")
+
+
+def test_changes_that_add_an_option_and_commands_merge_as_text_and_stay_right() -> None:
+    def add_option(root: click.Command) -> None:
+        root.commands["bake"].params.insert(3, click.Option(["--extra"], help="More."))
+
+    def add_subcommand(root: click.Command) -> None:
+        root.commands["oven"].commands["wipe"] = click.Command("wipe", help="Wipe it.")
+
+    def add_command(root: click.Command) -> None:
+        root.commands["apple"] = click.Command("apple", help="Core it.")
+
+    def page(*mutations: Any) -> str:
+        return gen.render_cli_reference(_toy_root_after(*mutations))
+
+    base = page()
+    assert list(_insertions(base, page(add_option)).values()) == [
+        ["| `--extra` | text |  |  | More. |"]
+    ]
+    assert "- [`wipe`](#soup-oven-wipe)" in sum(
+        _insertions(base, page(add_subcommand)).values(), []
+    )
+    merged = _merged(base, page(add_option), page(add_subcommand), page(add_command))
+    assert merged == page(add_option, add_subcommand, add_command)
+
+
+# --------------------------------------------------------------------------
 # 2c. what the pages must never carry
 # --------------------------------------------------------------------------
 
@@ -689,10 +1205,20 @@ def test_a_page_carries_nothing_from_this_machine(pages: dict[str, str], rel: st
 def test_a_page_says_it_is_generated_and_how_to_regenerate_it(
     pages: dict[str, str], rel: str
 ) -> None:
-    head = " ".join(pages[rel].split("\n## ", 1)[0].split())
+    lines = pages[rel].split("\n## ", 1)[0].splitlines()
+    head = " ".join(" ".join(line.lstrip("> ") for line in lines).split())
     assert "Generated file" in head and "do not edit by hand" in head, head
-    assert "`python scripts/gen_reference_docs.py`" in head, head
-    assert "`python scripts/gen_reference_docs.py --check`" in head, head
+    assert "`python scripts/gen_reference_docs.py` and commit the result" in head, head
+    assert "refreshed when a release is cut" in head, head
+
+
+@pytest.mark.parametrize("rel", ["docs/config-reference.md", "docs/cli-reference.md"])
+def test_a_page_header_carries_no_number_at_all(pages: dict[str, str], rel: str) -> None:
+    """No total, count, date or version above the first table: a line that sums over
+    the page changes in every pull request that adds a row, so two of them conflict,
+    or worse merge cleanly into a number that is wrong."""
+    head = pages[rel].split("\n## ", 1)[0]
+    assert re.findall(r"\d+", head) == [], rel
 
 
 @pytest.mark.parametrize("rel", ["docs/config-reference.md", "docs/cli-reference.md"])
@@ -1009,15 +1535,16 @@ def test_the_torch_probe_would_catch_a_regression() -> None:
 
 
 def test_the_script_runs_from_any_directory(tmp_path: Path) -> None:
-    """``python scripts/gen_reference_docs.py --check`` is what a contributor types:
-    no ``scripts`` package on ``sys.path``, and the pages found from the script's path."""
+    """``python scripts/gen_reference_docs.py`` is what a contributor types: no
+    ``scripts`` package on ``sys.path``, and the pages found from the script's path."""
+    script = str(_ROOT / "scripts" / "gen_reference_docs.py")
     proc = subprocess.run(
-        [sys.executable, str(_ROOT / "scripts" / "gen_reference_docs.py"), "--check"],
+        [sys.executable, script, "--check-structure"],
         capture_output=True,
         text=True,
         timeout=300,
         cwd=tmp_path,
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert "up to date" in _plain(proc.stdout), (proc.stdout, proc.stderr)
+    assert "state what the code does" in _plain(proc.stdout), (proc.stdout, proc.stderr)
     assert list(tmp_path.iterdir()) == []

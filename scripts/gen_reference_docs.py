@@ -5,8 +5,22 @@
 argument, walked out of the Click tree behind the Typer app. Neither page is written
 by hand: change the schema field or the option, then run this script.
 
-    python scripts/gen_reference_docs.py            # rewrite the pages that changed
-    python scripts/gen_reference_docs.py --check    # exit 1 and name each stale page
+    python scripts/gen_reference_docs.py                    # rewrite the pages that changed
+    python scripts/gen_reference_docs.py --check-structure  # what the test suite runs
+    python scripts/gen_reference_docs.py --check            # byte-exact, for a release
+
+Two checks, because they answer different questions. ``--check-structure`` parses the
+committed tables back into rows and compares what a page *states*: per config key its
+type, default and constraints; per command its parameters, each with its names, type,
+default and whether it is required. A missing, extra or changed one fails and is named.
+Descriptions, help text and command summaries are not compared, so rewording a help
+string does not turn a pull request red; the wording is refreshed when a release is cut.
+``--check`` compares the text itself and is what a release runs
+(``SOUP_DOCS_EXACT=1`` makes the test suite run it too).
+
+For the same reason no line on a page is a total or a list over several items: every
+line belongs to one key, one command or one parameter, so two changes that each add a
+different option merge as text and the merged page is still right.
 
 ``tests/test_gen_reference_docs.py`` runs the check on every interpreter and OS in the
 CI matrix, so the same text has to come out everywhere. What keeps it that way:
@@ -62,6 +76,8 @@ CLI_PAGE = "docs/cli-reference.md"
 RUNTIME_DEFAULT = "(set at runtime)"
 
 _REGENERATE = "python scripts/gen_reference_docs.py"
+#: How many differences ``--check-structure`` prints per page before "... and N more".
+_MAX_SHOWN = 10
 _NONE_TYPE = type(None)
 _NOT_LITERAL = object()
 
@@ -572,20 +588,19 @@ def _load_config_model() -> type[BaseModel]:
 def render_config_reference(model: type[BaseModel] | None = None) -> str:
     """The text of ``docs/config-reference.md``."""
     sections = config_sections(model if model is not None else _load_config_model())
-    total = sum(len(rows) for _, rows in sections)
     lines = [
         "# Config reference",
         "",
         "[← Back to the docs index](README.md)",
         "",
         "> **Generated file — do not edit by hand.**",
-        "> It is rendered from `SoupConfig` in `src/soup_cli/config/schema.py` by",
-        "> `scripts/gen_reference_docs.py`. To change a row, change the field in the schema and",
-        f"> run `{_REGENERATE}`. The test suite runs",
-        f"> `{_REGENERATE} --check`, which fails while this page is stale.",
+        "> It is rendered from `SoupConfig` in `src/soup_cli/config/schema.py`. After adding or",
+        "> removing a field, or changing its type, default or bounds, run",
+        f"> `{_REGENERATE}` and commit the result; the test suite fails",
+        "> until the page matches. Descriptions are refreshed when a release is cut, so between",
+        "> releases the wording here can trail the code.",
         "",
-        f"Every key `soup.yaml` accepts: {total} keys in {len(sections)} sections. A key that is",
-        "not on this page **refuses the load** — see",
+        "Every key `soup.yaml` accepts. A key that is not on this page **refuses the load** — see",
         "[Unknown config keys](backends-and-ops.md#unknown-config-keys) for the error and the",
         "nearest-name hint. The guides linked from the [docs index](README.md) explain what the",
         "settings do together; this page is the lookup table.",
@@ -604,12 +619,15 @@ def render_config_reference(model: type[BaseModel] | None = None) -> str:
         "  choices. Rules that span keys (a setting valid for one task or backend only) are",
         "  enforced by the schema's validators and named in the description.",
         "",
-        *_table_head("Section", "Keys"),
+        "Sections:",
+        "",
     ]
-    for path, rows in sections:
+    # One line per section and one row per key, never a total: two changes that each
+    # add a different key then merge as text and the merged page is still right.
+    for path, _rows in sections:
         title = _code(path) if path else "Top-level keys"
         anchor = github_slug(path) if path else "top-level-keys"
-        lines.append(_row([f"[{title}](#{anchor})", str(len(rows))]))
+        lines.append(f"- [{title}](#{anchor})")
     for path, rows in sections:
         lines += ["", f"## {_code(path)}" if path else "## Top-level keys", ""]
         lines += _table_head("Key", "Type", "Default", "Constraints", "Description")
@@ -847,12 +865,12 @@ def _command_section(entry: CommandEntry, anchors: dict[tuple[str, ...], str]) -
     blocks.append([f"Usage: {_code(_usage(entry.path, command))}"])
     if isinstance(command, click.Group):
         subs = [
-            f"[{_code(name)}](#{anchors[(*entry.path, name)]})"
+            f"- [{_code(name)}](#{anchors[(*entry.path, name)]})"
             for name in sorted(command.commands)
             if (*entry.path, name) in anchors
         ]
-        if subs:
-            blocks.append(["Subcommands: " + ", ".join(subs)])
+        if subs:  # one line per subcommand, so adding one never rewrites a shared line
+            blocks.append(["Subcommands:", "", *subs])
     rows = _param_rows(command)
     if rows:
         blocks.append([*_table_head("Name", "Type", "Default", "Required", "Help"), *rows])
@@ -878,28 +896,24 @@ def render_cli_reference(root: click.Command | None = None) -> str:
         slugger.take(fixed)
     anchors = {entry.path: slugger.take("soup " + " ".join(entry.path)) for entry in entries}
 
-    groups = sum(isinstance(entry.command, click.Group) for entry in entries)
-    params = [
-        param
-        for command in (root, *(entry.command for entry in entries))
-        for param in _visible_params(command)
-    ]
-    options = sum(isinstance(param, click.Option) for param in params)
+    # No totals anywhere on the page: every line below the header belongs to one
+    # command or one parameter, so two changes that each add a different option merge
+    # as text and the merged page is still right.
     lines = [
         "# CLI reference",
         "",
         "[← Back to the docs index](README.md)",
         "",
         "> **Generated file — do not edit by hand.**",
-        "> It is rendered from the live Typer command tree (`soup_cli.cli:app`) by",
-        "> `scripts/gen_reference_docs.py`. To change a row, change the option in the code and",
-        f"> run `{_REGENERATE}`. The test suite runs",
-        f"> `{_REGENERATE} --check`, which fails while this page is stale.",
+        "> It is rendered from the live Typer command tree (`soup_cli.cli:app`). After adding or",
+        "> removing a command, an option or an argument, or changing its type, its default or",
+        f"> whether it is required, run `{_REGENERATE}` and commit the",
+        "> result; the test suite fails until the page matches. Help text is refreshed when a",
+        "> release is cut, so between releases the wording here can trail the code.",
         "",
-        f"Every `soup` command with every option and argument: {len(entries) - groups} commands",
-        f"in {groups} command groups, {options} options and {len(params) - options} arguments.",
-        "For a one-line-per-task listing see the [Command reference](commands.md); for the keys",
-        "of `soup.yaml` see the [Config reference](config-reference.md).",
+        "Every `soup` command with every option and argument. For a one-line-per-task listing",
+        "see the [Command reference](commands.md); for the keys of `soup.yaml` see the",
+        "[Config reference](config-reference.md).",
         "",
         "How to read a table:",
         "",
@@ -980,6 +994,147 @@ def _first_difference(committed: str, fresh: str) -> list[str]:
     ]
 
 
+def split_row(line: str) -> list[str]:
+    """The cells of one Markdown table row. A backslash escapes the next character, so
+    ``\\|`` (in prose or inside a code span) stays inside its cell, as GitHub reads it."""
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in line.strip():
+        if escaped or char != "|":
+            current.append(char)
+            escaped = char == "\\" and not escaped
+        else:
+            cells.append("".join(current).strip())
+            current = []
+    cells.append("".join(current).strip())
+    return cells[1:-1]  # nothing before the first delimiter, nothing after the last
+
+
+def _data_cells(line: str, columns: int) -> list[str] | None:
+    """The cells of a body row of one of the generated tables, else ``None``: the first
+    cell of every body row is a code span, which a header or a rule line never is."""
+    if not line.startswith("|"):
+        return None
+    cells = split_row(line)
+    return cells if len(cells) == columns and cells[0].startswith("`") else None
+
+
+def parse_config_page(text: str) -> dict[str, dict[str, str]]:
+    """``{key: {"type": ..., "default": ..., "constraints": ...}}``, read back from the
+    tables of a config page. The description column is left out on purpose."""
+    keys: dict[str, dict[str, str]] = {}
+    for line in text.split("\n"):
+        cells = _data_cells(line, 5)
+        if cells is not None:
+            keys[cells[0].replace("`", "")] = {
+                "type": cells[1],
+                "default": cells[2],
+                "constraints": cells[3],
+            }
+    return keys
+
+
+def parse_cli_page(text: str) -> dict[str, dict[str, dict[str, str]]]:
+    """``{command: {parameter names: {"type": ..., "default": ..., "required": ...}}}``,
+    read back from a CLI page; the global options are under ``"soup"``. Help text, the
+    usage line and the command summary are left out on purpose."""
+    commands: dict[str, dict[str, dict[str, str]]] = {}
+    current: dict[str, dict[str, str]] | None = None
+    for line in text.split("\n"):
+        if line.startswith("#"):
+            title = line.lstrip("#").strip().replace("`", "")
+            if title == "Global options":
+                title = "soup"
+            is_command = title == "soup" or title.startswith("soup ")
+            current = commands.setdefault(title, {}) if is_command else None
+            continue
+        if current is None:
+            continue
+        cells = _data_cells(line, 5)
+        if cells is not None:
+            current[cells[0].replace("`", "")] = {
+                "type": cells[1],
+                "default": cells[2],
+                "required": cells[3],
+            }
+    return commands
+
+
+def _shown(cell: str) -> str:
+    return cell.replace("\\|", "|") or "(empty)"
+
+
+def _item_drift(
+    label: str, old: dict[str, str] | None, new: dict[str, str] | None, gone: str
+) -> list[str]:
+    """The differences for one key or one parameter, as lines of the report."""
+    if new is None:
+        return [f"{label}: on the page, {gone}"]
+    if old is None:
+        stated = ", ".join(f"{column} {_shown(cell)}" for column, cell in new.items())
+        return [f"{label}: not on the page ({stated})"]
+    return [
+        f"{label}: {column} {_shown(old[column])} -> {_shown(cell)}"
+        for column, cell in new.items()
+        if old[column] != cell
+    ]
+
+
+def config_drift(committed: str, fresh: str) -> list[str]:
+    """What the committed config page states differently from a fresh render."""
+    old, new = parse_config_page(committed), parse_config_page(fresh)
+    lines: list[str] = []
+    for key in dict.fromkeys([*new, *old]):
+        lines += _item_drift(key, old.get(key), new.get(key), "no longer in the schema")
+    return lines
+
+
+def cli_drift(committed: str, fresh: str) -> list[str]:
+    """What the committed CLI page states differently from a fresh render."""
+    old, new = parse_cli_page(committed), parse_cli_page(fresh)
+    lines: list[str] = []
+    for command in dict.fromkeys([*new, *old]):
+        if command not in old:
+            lines.append(f"{command}: command not on the page")
+        elif command not in new:
+            lines.append(f"{command}: on the page, no longer a registered command")
+        else:
+            was, now = old[command], new[command]
+            for name in dict.fromkeys([*now, *was]):
+                lines += _item_drift(
+                    f"{command} {name}", was.get(name), now.get(name), "no longer in the CLI"
+                )
+    return lines
+
+
+def structure_drift(root: Path, pages: dict[str, str]) -> dict[str, list[str]]:
+    """``{page: differences}`` for every page under ``root`` whose tables no longer state
+    what the code does. Wording is not looked at; a missing page is one difference."""
+    found: dict[str, list[str]] = {}
+    for rel, fresh in pages.items():
+        committed = _committed(root, rel)
+        if committed is None:
+            found[rel] = ["the page is missing"]
+            continue
+        lines = (config_drift if rel == CONFIG_PAGE else cli_drift)(committed, fresh)
+        if lines:
+            found[rel] = lines
+    return found
+
+
+def _report_structure(drift: dict[str, list[str]]) -> None:
+    for rel, lines in drift.items():
+        subject = "the schema" if rel == CONFIG_PAGE else "the CLI"
+        count = f"{len(lines)} difference{'s' if len(lines) != 1 else ''}"
+        print(f"{rel} no longer matches {subject} ({count}):")
+        for line in lines[:_MAX_SHOWN]:
+            print("  " + line.encode("ascii", "backslashreplace").decode("ascii"))
+        if len(lines) > _MAX_SHOWN:
+            print(f"  ... and {len(lines) - _MAX_SHOWN} more")
+    print(f"Run `{_REGENERATE}` and commit the result.")
+
+
 def _ensure_checkout_on_path() -> None:
     """Import ``soup_cli`` from this checkout when the script is run by path."""
     src = str(_SCRIPT_REPO_ROOT / "src")
@@ -1001,14 +1156,23 @@ def _foreign_install() -> str | None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Rewrite the pages, or with ``--check`` report the stale ones and exit 1."""
+    """Rewrite the pages, or with one of the two checks report and exit 1."""
     parser = argparse.ArgumentParser(
         description="Render docs/config-reference.md and docs/cli-reference.md from the code."
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--check-structure",
+        action="store_true",
+        help=(
+            "write nothing; exit 1 and name each key, command or parameter the pages state "
+            "differently from the code (wording is not compared)"
+        ),
+    )
+    mode.add_argument(
         "--check",
         action="store_true",
-        help="write nothing; exit 1 and name each page that differs from a fresh render",
+        help="write nothing; exit 1 and name each page whose text differs from a fresh render",
     )
     args = parser.parse_args(argv)
 
@@ -1021,6 +1185,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     pages = render_pages()
+    if args.check_structure:
+        drift = structure_drift(_REPO_ROOT, pages)
+        if drift:
+            _report_structure(drift)
+            return 1
+        print(f"{CONFIG_PAGE} and {CLI_PAGE} state what the code does (wording not compared).")
+        return 0
     stale = stale_pages(_REPO_ROOT, pages)
     if not stale:
         state = "up to date" if args.check else "up to date; nothing to do"

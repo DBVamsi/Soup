@@ -3,15 +3,15 @@
 [← Back to the docs index](README.md)
 
 > **Generated file — do not edit by hand.**
-> It is rendered from the live Typer command tree (`soup_cli.cli:app`) by
-> `scripts/gen_reference_docs.py`. To change a row, change the option in the code and
-> run `python scripts/gen_reference_docs.py`. The test suite runs
-> `python scripts/gen_reference_docs.py --check`, which fails while this page is stale.
+> It is rendered from the live Typer command tree (`soup_cli.cli:app`). After adding or
+> removing a command, an option or an argument, or changing its type, its default or
+> whether it is required, run `python scripts/gen_reference_docs.py` and commit the
+> result; the test suite fails until the page matches. Help text is refreshed when a
+> release is cut, so between releases the wording here can trail the code.
 
-Every `soup` command with every option and argument: 219 commands
-in 34 command groups, 1037 options and 125 arguments.
-For a one-line-per-task listing see the [Command reference](commands.md); for the keys
-of `soup.yaml` see the [Config reference](config-reference.md).
+Every `soup` command with every option and argument. For a one-line-per-task listing
+see the [Command reference](commands.md); for the keys of `soup.yaml` see the
+[Config reference](config-reference.md).
 
 How to read a table:
 
@@ -146,7 +146,26 @@ Adapter management: list, info, compare LoRA adapters.
 
 Usage: `soup adapters <command> [ARGS]...`
 
-Subcommands: [`arithmetic`](#soup-adapters-arithmetic), [`audit`](#soup-adapters-audit), [`bisect`](#soup-adapters-bisect), [`blame`](#soup-adapters-blame), [`branch`](#soup-adapters-branch), [`branches`](#soup-adapters-branches), [`check`](#soup-adapters-check), [`check-safetensors`](#soup-adapters-check-safetensors), [`checkout`](#soup-adapters-checkout), [`compare`](#soup-adapters-compare), [`diff`](#soup-adapters-diff), [`info`](#soup-adapters-info), [`list`](#soup-adapters-list), [`merge`](#soup-adapters-merge), [`pr`](#soup-adapters-pr), [`scan`](#soup-adapters-scan), [`sign`](#soup-adapters-sign), [`verify`](#soup-adapters-verify)
+Subcommands:
+
+- [`arithmetic`](#soup-adapters-arithmetic)
+- [`audit`](#soup-adapters-audit)
+- [`bisect`](#soup-adapters-bisect)
+- [`blame`](#soup-adapters-blame)
+- [`branch`](#soup-adapters-branch)
+- [`branches`](#soup-adapters-branches)
+- [`check`](#soup-adapters-check)
+- [`check-safetensors`](#soup-adapters-check-safetensors)
+- [`checkout`](#soup-adapters-checkout)
+- [`compare`](#soup-adapters-compare)
+- [`diff`](#soup-adapters-diff)
+- [`info`](#soup-adapters-info)
+- [`list`](#soup-adapters-list)
+- [`merge`](#soup-adapters-merge)
+- [`pr`](#soup-adapters-pr)
+- [`scan`](#soup-adapters-scan)
+- [`sign`](#soup-adapters-sign)
+- [`verify`](#soup-adapters-verify)
 
 ### `soup adapters arithmetic`
 
@@ -394,7 +413,11 @@ Pre-flight decision: PROMPT_ENG / RAG / SFT / DPO / GRPO. Run BEFORE you spend 8
 
 Usage: `soup advise <command> [ARGS]...`
 
-Subcommands: [`compare`](#soup-advise-compare), [`explain`](#soup-advise-explain), [`run`](#soup-advise-run)
+Subcommands:
+
+- [`compare`](#soup-advise-compare)
+- [`explain`](#soup-advise-explain)
+- [`run`](#soup-advise-run)
 
 ### `soup advise compare`
 
@@ -436,7 +459,11 @@ Agent Forge: spec -> tool-calling dataset / train / eval (v0.46.0).
 
 Usage: `soup agent <command> [ARGS]...`
 
-Subcommands: [`eval`](#soup-agent-eval), [`synth`](#soup-agent-synth), [`train`](#soup-agent-train)
+Subcommands:
+
+- [`eval`](#soup-agent-eval)
+- [`synth`](#soup-agent-synth)
+- [`train`](#soup-agent-train)
 
 ### `soup agent eval`
 
@@ -525,7 +552,10 @@ In-toto + SLSA-3 attestations per Soup Can stage (v0.59.0).
 
 Usage: `soup attest <command> [ARGS]...`
 
-Subcommands: [`emit`](#soup-attest-emit), [`verify`](#soup-attest-verify)
+Subcommands:
+
+- [`emit`](#soup-attest-emit)
+- [`verify`](#soup-attest-verify)
 
 ### `soup attest emit`
 
@@ -566,7 +596,10 @@ HIPAA/SOC2-shaped JSONL audit log: tail + rotate (v0.59.0).
 
 Usage: `soup audit-log <command> [ARGS]...`
 
-Subcommands: [`rotate`](#soup-audit-log-rotate), [`tail`](#soup-audit-log-tail)
+Subcommands:
+
+- [`rotate`](#soup-audit-log-rotate)
+- [`tail`](#soup-audit-log-tail)
 
 ### `soup audit-log rotate`
 
@@ -613,7 +646,10 @@ Benchmark a model: inference speed (infer, the default) or training (train).
 
 Usage: `soup bench <command> [ARGS]...`
 
-Subcommands: [`infer`](#soup-bench-infer), [`train`](#soup-bench-train)
+Subcommands:
+
+- [`infer`](#soup-bench-infer)
+- [`train`](#soup-bench-train)
 
 ### `soup bench infer`
 
@@ -652,7 +688,9 @@ CycloneDX ML-BOM + SPDX AI bill-of-materials emitter (v0.59.0).
 
 Usage: `soup bom <command> [ARGS]...`
 
-Subcommands: [`emit`](#soup-bom-emit)
+Subcommands:
+
+- [`emit`](#soup-bom-emit)
 
 ### `soup bom emit`
 
@@ -693,7 +731,14 @@ Soup Cans: pack/inspect/verify/fork shareable .can artifacts.
 
 Usage: `soup can <command> [ARGS]...`
 
-Subcommands: [`fork`](#soup-can-fork), [`inspect`](#soup-can-inspect), [`pack`](#soup-can-pack), [`publish`](#soup-can-publish), [`run`](#soup-can-run), [`verify`](#soup-can-verify)
+Subcommands:
+
+- [`fork`](#soup-can-fork)
+- [`inspect`](#soup-can-inspect)
+- [`pack`](#soup-can-pack)
+- [`publish`](#soup-can-publish)
+- [`run`](#soup-can-run)
+- [`verify`](#soup-can-verify)
 
 ### `soup can fork`
 
@@ -803,7 +848,9 @@ Fine-tuning CI: init a PR gate workflow.
 
 Usage: `soup ci <command> [ARGS]...`
 
-Subcommands: [`init`](#soup-ci-init)
+Subcommands:
+
+- [`init`](#soup-ci-init)
 
 ### `soup ci init`
 
@@ -879,7 +926,51 @@ Dataset tools: inspect, convert, merge, dedup, validate, stats.
 
 Usage: `soup data <command> [ARGS]...`
 
-Subcommands: [`active-sample`](#soup-data-active-sample), [`augment`](#soup-data-augment), [`best-of-n`](#soup-data-best-of-n), [`brain-rot`](#soup-data-brain-rot), [`canary`](#soup-data-canary), [`clean`](#soup-data-clean), [`convert`](#soup-data-convert), [`decontaminate`](#soup-data-decontaminate), [`dedup`](#soup-data-dedup), [`demo`](#soup-data-demo), [`doctor`](#soup-data-doctor), [`download`](#soup-data-download), [`educational`](#soup-data-educational), [`evolve`](#soup-data-evolve), [`filter`](#soup-data-filter), [`forge`](#soup-data-forge), [`from-traces`](#soup-data-from-traces), [`gen-magpie`](#soup-data-gen-magpie), [`generate`](#soup-data-generate), [`ingest`](#soup-data-ingest), [`inspect`](#soup-data-inspect), [`langdetect`](#soup-data-langdetect), [`lint`](#soup-data-lint), [`merge`](#soup-data-merge), [`mix`](#soup-data-mix), [`persona-mix`](#soup-data-persona-mix), [`pii`](#soup-data-pii), [`preprocess`](#soup-data-preprocess), [`preview`](#soup-data-preview), [`push`](#soup-data-push), [`recipe`](#soup-data-recipe), [`register`](#soup-data-register), [`registry`](#soup-data-registry), [`review`](#soup-data-review), [`sample`](#soup-data-sample), [`score`](#soup-data-score), [`search`](#soup-data-search), [`split`](#soup-data-split), [`stats`](#soup-data-stats), [`topics`](#soup-data-topics), [`toxicity`](#soup-data-toxicity), [`unregister`](#soup-data-unregister), [`validate`](#soup-data-validate)
+Subcommands:
+
+- [`active-sample`](#soup-data-active-sample)
+- [`augment`](#soup-data-augment)
+- [`best-of-n`](#soup-data-best-of-n)
+- [`brain-rot`](#soup-data-brain-rot)
+- [`canary`](#soup-data-canary)
+- [`clean`](#soup-data-clean)
+- [`convert`](#soup-data-convert)
+- [`decontaminate`](#soup-data-decontaminate)
+- [`dedup`](#soup-data-dedup)
+- [`demo`](#soup-data-demo)
+- [`doctor`](#soup-data-doctor)
+- [`download`](#soup-data-download)
+- [`educational`](#soup-data-educational)
+- [`evolve`](#soup-data-evolve)
+- [`filter`](#soup-data-filter)
+- [`forge`](#soup-data-forge)
+- [`from-traces`](#soup-data-from-traces)
+- [`gen-magpie`](#soup-data-gen-magpie)
+- [`generate`](#soup-data-generate)
+- [`ingest`](#soup-data-ingest)
+- [`inspect`](#soup-data-inspect)
+- [`langdetect`](#soup-data-langdetect)
+- [`lint`](#soup-data-lint)
+- [`merge`](#soup-data-merge)
+- [`mix`](#soup-data-mix)
+- [`persona-mix`](#soup-data-persona-mix)
+- [`pii`](#soup-data-pii)
+- [`preprocess`](#soup-data-preprocess)
+- [`preview`](#soup-data-preview)
+- [`push`](#soup-data-push)
+- [`recipe`](#soup-data-recipe)
+- [`register`](#soup-data-register)
+- [`registry`](#soup-data-registry)
+- [`review`](#soup-data-review)
+- [`sample`](#soup-data-sample)
+- [`score`](#soup-data-score)
+- [`search`](#soup-data-search)
+- [`split`](#soup-data-split)
+- [`stats`](#soup-data-stats)
+- [`topics`](#soup-data-topics)
+- [`toxicity`](#soup-data-toxicity)
+- [`unregister`](#soup-data-unregister)
+- [`validate`](#soup-data-validate)
 
 ### `soup data active-sample`
 
@@ -965,7 +1056,10 @@ Dataset canaries (memorization probe).
 
 Usage: `soup data canary <command> [ARGS]...`
 
-Subcommands: [`check`](#soup-data-canary-check), [`insert`](#soup-data-canary-insert)
+Subcommands:
+
+- [`check`](#soup-data-canary-check)
+- [`insert`](#soup-data-canary-insert)
 
 #### `soup data canary check`
 
@@ -1575,7 +1669,11 @@ Deploy models: Ollama integration (deploy, list, remove).
 
 Usage: `soup deploy <command> [ARGS]...`
 
-Subcommands: [`autopilot`](#soup-deploy-autopilot), [`hf-space`](#soup-deploy-hf-space), [`ollama`](#soup-deploy-ollama)
+Subcommands:
+
+- [`autopilot`](#soup-deploy-autopilot)
+- [`hf-space`](#soup-deploy-hf-space)
+- [`ollama`](#soup-deploy-ollama)
 
 ### `soup deploy autopilot`
 
@@ -1708,7 +1806,11 @@ Train + measure a speculative-decoding draft model: distil your tuned model into
 
 Usage: `soup draft <command> [ARGS]...`
 
-Subcommands: [`distill`](#soup-draft-distill), [`list`](#soup-draft-list), [`measure`](#soup-draft-measure)
+Subcommands:
+
+- [`distill`](#soup-draft-distill)
+- [`list`](#soup-draft-list)
+- [`measure`](#soup-draft-measure)
 
 ### `soup draft distill`
 
@@ -1776,7 +1878,10 @@ Knowledge editing (ROME / MEMIT / AlphaEdit) - patch facts without re-training (
 
 Usage: `soup edit <command> [ARGS]...`
 
-Subcommands: [`diff`](#soup-edit-diff), [`set`](#soup-edit-set)
+Subcommands:
+
+- [`diff`](#soup-edit-diff)
+- [`set`](#soup-edit-set)
 
 ### `soup edit diff`
 
@@ -1821,7 +1926,12 @@ Hermetic env lockfile + ABI drift detection (v0.64.0).
 
 Usage: `soup env <command> [ARGS]...`
 
-Subcommands: [`check`](#soup-env-check), [`fix`](#soup-env-fix), [`lock`](#soup-env-lock), [`status`](#soup-env-status)
+Subcommands:
+
+- [`check`](#soup-env-check)
+- [`fix`](#soup-env-fix)
+- [`lock`](#soup-env-lock)
+- [`status`](#soup-env-status)
 
 ### `soup env check`
 
@@ -1871,7 +1981,30 @@ Evaluate models: benchmarks, custom evals, LLM judge, leaderboard.
 
 Usage: `soup eval <command> [ARGS]...`
 
-Subcommands: [`against`](#soup-eval-against), [`aider`](#soup-eval-aider), [`auto`](#soup-eval-auto), [`behavior`](#soup-eval-behavior), [`benchmark`](#soup-eval-benchmark), [`capability`](#soup-eval-capability), [`checklist`](#soup-eval-checklist), [`citation`](#soup-eval-citation), [`compare`](#soup-eval-compare), [`coverage`](#soup-eval-coverage), [`custom`](#soup-eval-custom), [`design`](#soup-eval-design), [`discover`](#soup-eval-discover), [`gate`](#soup-eval-gate), [`gate-install`](#soup-eval-gate-install), [`human`](#soup-eval-human), [`irt-subset`](#soup-eval-irt-subset), [`judge`](#soup-eval-judge), [`leaderboard`](#soup-eval-leaderboard), [`lock`](#soup-eval-lock), [`quant-check`](#soup-eval-quant-check), [`unlearning`](#soup-eval-unlearning)
+Subcommands:
+
+- [`against`](#soup-eval-against)
+- [`aider`](#soup-eval-aider)
+- [`auto`](#soup-eval-auto)
+- [`behavior`](#soup-eval-behavior)
+- [`benchmark`](#soup-eval-benchmark)
+- [`capability`](#soup-eval-capability)
+- [`checklist`](#soup-eval-checklist)
+- [`citation`](#soup-eval-citation)
+- [`compare`](#soup-eval-compare)
+- [`coverage`](#soup-eval-coverage)
+- [`custom`](#soup-eval-custom)
+- [`design`](#soup-eval-design)
+- [`discover`](#soup-eval-discover)
+- [`gate`](#soup-eval-gate)
+- [`gate-install`](#soup-eval-gate-install)
+- [`human`](#soup-eval-human)
+- [`irt-subset`](#soup-eval-irt-subset)
+- [`judge`](#soup-eval-judge)
+- [`leaderboard`](#soup-eval-leaderboard)
+- [`lock`](#soup-eval-lock)
+- [`quant-check`](#soup-eval-quant-check)
+- [`unlearning`](#soup-eval-unlearning)
 
 ### `soup eval against`
 
@@ -2328,7 +2461,13 @@ Proxy to llama.cpp binaries (cli / mtmd-cli / gguf-split / server).
 
 Usage: `soup llama [<command>] [ARGS]...`
 
-Subcommands: [`cli`](#soup-llama-cli), [`gguf-split`](#soup-llama-gguf-split), [`mtmd-cli`](#soup-llama-mtmd-cli), [`quantize`](#soup-llama-quantize), [`server`](#soup-llama-server)
+Subcommands:
+
+- [`cli`](#soup-llama-cli)
+- [`gguf-split`](#soup-llama-gguf-split)
+- [`mtmd-cli`](#soup-llama-mtmd-cli)
+- [`quantize`](#soup-llama-quantize)
+- [`server`](#soup-llama-server)
 
 ### `soup llama cli`
 
@@ -2386,7 +2525,13 @@ Personal-LLM flywheel daemon (init / status / record / harvest / train) (v0.68.0
 
 Usage: `soup local-rl <command> [ARGS]...`
 
-Subcommands: [`harvest`](#soup-local-rl-harvest), [`init`](#soup-local-rl-init), [`record`](#soup-local-rl-record), [`status`](#soup-local-rl-status), [`train`](#soup-local-rl-train)
+Subcommands:
+
+- [`harvest`](#soup-local-rl-harvest)
+- [`init`](#soup-local-rl-init)
+- [`record`](#soup-local-rl-record)
+- [`status`](#soup-local-rl-status)
+- [`train`](#soup-local-rl-train)
 
 ### `soup local-rl harvest`
 
@@ -2457,7 +2602,11 @@ Shared run lockfile (write / show / check).
 
 Usage: `soup lock <command> [ARGS]...`
 
-Subcommands: [`check`](#soup-lock-check), [`show`](#soup-lock-show), [`write`](#soup-lock-write)
+Subcommands:
+
+- [`check`](#soup-lock-check)
+- [`show`](#soup-lock-show)
+- [`write`](#soup-lock-write)
 
 ### `soup lock check`
 
@@ -2504,7 +2653,15 @@ Data flywheel: traces -> preference pairs -> DPO -> gate -> canary deploy -> rol
 
 Usage: `soup loop <command> [ARGS]...`
 
-Subcommands: [`canary`](#soup-loop-canary), [`init`](#soup-loop-init), [`pause`](#soup-loop-pause), [`replay`](#soup-loop-replay), [`resume`](#soup-loop-resume), [`status`](#soup-loop-status), [`watch`](#soup-loop-watch)
+Subcommands:
+
+- [`canary`](#soup-loop-canary)
+- [`init`](#soup-loop-init)
+- [`pause`](#soup-loop-pause)
+- [`replay`](#soup-loop-replay)
+- [`resume`](#soup-loop-resume)
+- [`status`](#soup-loop-status)
+- [`watch`](#soup-loop-watch)
 
 ### `soup loop canary`
 
@@ -2590,7 +2747,10 @@ Model Context Protocol server - drive Soup from any MCP client (v0.71.28).
 
 Usage: `soup mcp <command> [ARGS]...`
 
-Subcommands: [`runs`](#soup-mcp-runs), [`serve`](#soup-mcp-serve)
+Subcommands:
+
+- [`runs`](#soup-mcp-runs)
+- [`serve`](#soup-mcp-serve)
 
 ### `soup mcp runs`
 
@@ -2598,7 +2758,9 @@ Recover persisted MCP execution runs.
 
 Usage: `soup mcp runs <command> [ARGS]...`
 
-Subcommands: [`reconcile`](#soup-mcp-runs-reconcile)
+Subcommands:
+
+- [`reconcile`](#soup-mcp-runs-reconcile)
 
 #### `soup mcp runs reconcile`
 
@@ -2697,7 +2859,12 @@ Discover, list, enable, and disable Soup plugins.
 
 Usage: `soup plugins [<command>] [ARGS]...`
 
-Subcommands: [`disable`](#soup-plugins-disable), [`enable`](#soup-plugins-enable), [`install`](#soup-plugins-install), [`list`](#soup-plugins-list)
+Subcommands:
+
+- [`disable`](#soup-plugins-disable)
+- [`enable`](#soup-plugins-enable)
+- [`install`](#soup-plugins-install)
+- [`list`](#soup-plugins-list)
 
 ### `soup plugins disable`
 
@@ -2739,7 +2906,14 @@ Activation probes: sleeper-agent defection / honesty / misuse / pairwise interfe
 
 Usage: `soup probe <command> [ARGS]...`
 
-Subcommands: [`harm`](#soup-probe-harm), [`interference`](#soup-probe-interference), [`pack`](#soup-probe-pack), [`sae-diff`](#soup-probe-sae-diff), [`sleeper`](#soup-probe-sleeper), [`truth`](#soup-probe-truth)
+Subcommands:
+
+- [`harm`](#soup-probe-harm)
+- [`interference`](#soup-probe-interference)
+- [`pack`](#soup-probe-pack)
+- [`sae-diff`](#soup-probe-sae-diff)
+- [`sleeper`](#soup-probe-sleeper)
+- [`truth`](#soup-probe-truth)
 
 ### `soup probe harm`
 
@@ -2911,7 +3085,13 @@ Ready-made configs: list, show, use, search recipes for popular models.
 
 Usage: `soup recipes <command> [ARGS]...`
 
-Subcommands: [`list`](#soup-recipes-list), [`search`](#soup-recipes-search), [`show`](#soup-recipes-show), [`use`](#soup-recipes-use), [`verify`](#soup-recipes-verify)
+Subcommands:
+
+- [`list`](#soup-recipes-list)
+- [`search`](#soup-recipes-search)
+- [`show`](#soup-recipes-show)
+- [`use`](#soup-recipes-use)
+- [`verify`](#soup-recipes-verify)
 
 ### `soup recipes list`
 
@@ -2973,7 +3153,15 @@ Model Registry: push, list, show, diff, search, promote, delete.
 
 Usage: `soup registry <command> [ARGS]...`
 
-Subcommands: [`delete`](#soup-registry-delete), [`diff`](#soup-registry-diff), [`list`](#soup-registry-list), [`promote`](#soup-registry-promote), [`push`](#soup-registry-push), [`search`](#soup-registry-search), [`show`](#soup-registry-show)
+Subcommands:
+
+- [`delete`](#soup-registry-delete)
+- [`diff`](#soup-registry-diff)
+- [`list`](#soup-registry-list)
+- [`promote`](#soup-registry-promote)
+- [`push`](#soup-registry-push)
+- [`search`](#soup-registry-search)
+- [`show`](#soup-registry-show)
 
 ### `soup registry delete`
 
@@ -3062,7 +3250,10 @@ Synthesize a deterministic reward verifier from reference outputs, with a calibr
 
 Usage: `soup reward <command> [ARGS]...`
 
-Subcommands: [`stress`](#soup-reward-stress), [`synth`](#soup-reward-synth)
+Subcommands:
+
+- [`stress`](#soup-reward-stress)
+- [`synth`](#soup-reward-synth)
 
 ### `soup reward stress`
 
@@ -3120,7 +3311,14 @@ Experiment tracking: list, show, compare runs.
 
 Usage: `soup runs [OPTIONS] [<command>] [ARGS]...`
 
-Subcommands: [`clean`](#soup-runs-clean), [`compare`](#soup-runs-compare), [`curriculum-curve`](#soup-runs-curriculum-curve), [`delete`](#soup-runs-delete), [`replay`](#soup-runs-replay), [`show`](#soup-runs-show)
+Subcommands:
+
+- [`clean`](#soup-runs-clean)
+- [`compare`](#soup-runs-compare)
+- [`curriculum-curve`](#soup-runs-curriculum-curve)
+- [`delete`](#soup-runs-delete)
+- [`replay`](#soup-runs-replay)
+- [`show`](#soup-runs-show)
 
 | Name | Type | Default | Required | Help |
 |---|---|---|---|---|
@@ -3293,7 +3491,9 @@ Spectrum SNR scan for targeted training (v0.71.23).
 
 Usage: `soup spectrum <command> [ARGS]...`
 
-Subcommands: [`scan`](#soup-spectrum-scan)
+Subcommands:
+
+- [`scan`](#soup-spectrum-scan)
 
 ### `soup spectrum scan`
 
@@ -3315,7 +3515,11 @@ Activation steering (CAA / ITI / RepE) - inference-time intervention without ret
 
 Usage: `soup steer <command> [ARGS]...`
 
-Subcommands: [`apply`](#soup-steer-apply), [`list`](#soup-steer-list), [`train`](#soup-steer-train)
+Subcommands:
+
+- [`apply`](#soup-steer-apply)
+- [`list`](#soup-steer-list)
+- [`train`](#soup-steer-train)
 
 ### `soup steer apply`
 
@@ -3379,7 +3583,9 @@ Tokenizer tools: train a BPE tokenizer from JSONL (v0.53.9).
 
 Usage: `soup tokenizer <command> [ARGS]...`
 
-Subcommands: [`train`](#soup-tokenizer-train)
+Subcommands:
+
+- [`train`](#soup-tokenizer-train)
 
 ### `soup tokenizer train`
 

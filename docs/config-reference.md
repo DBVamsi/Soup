@@ -3,13 +3,13 @@
 [← Back to the docs index](README.md)
 
 > **Generated file — do not edit by hand.**
-> It is rendered from `SoupConfig` in `src/soup_cli/config/schema.py` by
-> `scripts/gen_reference_docs.py`. To change a row, change the field in the schema and
-> run `python scripts/gen_reference_docs.py`. The test suite runs
-> `python scripts/gen_reference_docs.py --check`, which fails while this page is stale.
+> It is rendered from `SoupConfig` in `src/soup_cli/config/schema.py`. After adding or
+> removing a field, or changing its type, default or bounds, run
+> `python scripts/gen_reference_docs.py` and commit the result; the test suite fails
+> until the page matches. Descriptions are refreshed when a release is cut, so between
+> releases the wording here can trail the code.
 
-Every key `soup.yaml` accepts: 326 keys in 8 sections. A key that is
-not on this page **refuses the load** — see
+Every key `soup.yaml` accepts. A key that is not on this page **refuses the load** — see
 [Unknown config keys](backends-and-ops.md#unknown-config-keys) for the error and the
 nearest-name hint. The guides linked from the [docs index](README.md) explain what the
 settings do together; this page is the lookup table.
@@ -28,16 +28,16 @@ How to read a table:
   choices. Rules that span keys (a setting valid for one task or backend only) are
   enforced by the schema's validators and named in the description.
 
-| Section | Keys |
-|---|---|
-| [Top-level keys](#top-level-keys) | 10 |
-| [`data`](#data) | 38 |
-| [`training`](#training) | 243 |
-| [`training.lora`](#traininglora) | 14 |
-| [`training.eval_gate`](#trainingeval_gate) | 6 |
-| [`eval`](#eval) | 5 |
-| [`eval.ship`](#evalship) | 7 |
-| [`advise`](#advise) | 3 |
+Sections:
+
+- [Top-level keys](#top-level-keys)
+- [`data`](#data)
+- [`training`](#training)
+- [`training.lora`](#traininglora)
+- [`training.eval_gate`](#trainingeval_gate)
+- [`eval`](#eval)
+- [`eval.ship`](#evalship)
+- [`advise`](#advise)
 
 ## Top-level keys
 
