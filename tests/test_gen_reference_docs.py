@@ -106,6 +106,14 @@ def test_the_generator_renders_exactly_the_two_pages(pages: dict[str, str]) -> N
     assert {gen.CONFIG_PAGE, gen.CLI_PAGE} == set(pages)
 
 
+def test_the_docs_index_links_both_pages() -> None:
+    """Nothing else links them: a page missing from the index cannot be found."""
+    index = (_ROOT / "docs" / "README.md").read_text(encoding="utf-8")
+    rows = [line for line in index.splitlines() if line.startswith("| [")]
+    assert sum("](config-reference.md)" in row for row in rows) == 1, rows
+    assert sum("](cli-reference.md)" in row for row in rows) == 1, rows
+
+
 def test_check_names_only_the_page_that_lost_a_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
