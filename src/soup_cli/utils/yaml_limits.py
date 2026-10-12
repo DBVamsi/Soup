@@ -255,35 +255,64 @@ class _LimitedLoader(yaml.SafeLoader):
         return source.value
 
     def flatten_mapping(self, node: yaml.MappingNode) -> None:
-        """As ``SafeConstructor.flatten_mapping``, with the copies counted."""
+        """As ``SafeConstructor.flatten_mapping``, step for step, with the copies counted."""
         self._merge_depth += 1
         if self._merge_depth > MAX_YAML_NESTING:
             raise _MergeChainError
         merged: list = []
-        kept: list = []
-        for key_node, value_node in node.value:
-            if key_node.tag == _MERGE_TAG:
-                if isinstance(value_node, yaml.MappingNode):
-                    merged.extend(self._merged_pairs(node, value_node))
-                elif isinstance(value_node, yaml.SequenceNode):
-                    parts = [self._merged_pairs(node, source) for source in value_node.value]
-                    # A later mapping in the list yields to an earlier one.
-                    for pairs in reversed(parts):
-                        merged.extend(pairs)
-                else:
-                    raise yaml.constructor.ConstructorError(
-                        "while constructing a mapping",
-                        node.start_mark,
-                        "expected a mapping or list of mappings for merging, "
-                        f"but found {value_node.id}",
-                        value_node.start_mark,
-                    )
+        index = 0
+        while index < len(node.value):
+            key_node, value_node = node.value[index]
+            if key_node.tag != _MERGE_TAG:
+                if key_node.tag == _VALUE_TAG:
+                    key_node.tag = "tag:yaml.org,2002:str"
+                index += 1
                 continue
-            if key_node.tag == _VALUE_TAG:
-                key_node.tag = "tag:yaml.org,2002:str"
-            kept.append((key_node, value_node))
-        node.value = merged + kept
+            # Taken out before the mappings it names are visited, as PyYAML does:
+            # a mapping that names itself is then merged without this entry.
+            del node.value[index]
+            if isinstance(value_node, yaml.MappingNode):
+                merged.extend(self._merged_pairs(node, value_node))
+            elif isinstance(value_node, yaml.SequenceNode):
+                parts = [self._merged_pairs(node, source) for source in value_node.value]
+                # A later mapping in the list yields to an earlier one.
+                for pairs in reversed(parts):
+                    merged.extend(pairs)
+            else:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "expected a mapping or list of mappings for merging, "
+                    f"but found {value_node.id}",
+                    value_node.start_mark,
+                )
+        if merged:
+            node.value = merged + node.value
         self._merge_depth -= 1
+
+
+class YamlScalarError(yaml.constructor.ConstructorError, ValueError):
+    """A scalar that reads as a YAML type but cannot be built, such as a date
+    that does not exist. Both a ``yaml.YAMLError`` (it carries the position) and
+    the ``ValueError`` the underlying conversion raised."""
+
+
+def _checked(build):
+    def construct(self: _LimitedLoader, node: yaml.ScalarNode) -> object:
+        try:
+            return build(self, node)
+        except ValueError as exc:
+            raise YamlScalarError(
+                None, None, f"cannot build this value: {exc}", node.start_mark
+            ) from None
+
+    return construct
+
+
+# The three safe constructors that convert text with a Python call that can refuse it.
+for _name in ("int", "float", "timestamp"):
+    _tag = f"tag:yaml.org,2002:{_name}"
+    _LimitedLoader.add_constructor(_tag, _checked(yaml.SafeLoader.yaml_constructors[_tag]))
 
 
 def _parse(source: str | bytes, what: str, *, source_bytes: int) -> object:
@@ -319,7 +348,8 @@ def load_yaml_limited(source: str | bytes, what: str, *, max_bytes: int) -> obje
     :class:`YamlLimitError` -- a ``ValueError`` whose message starts with
     ``what`` -- when the text is longer than ``max_bytes`` (UTF-8), nests
     collections more than :data:`MAX_YAML_NESTING` levels, or expands past the
-    node allowance. A syntax error is still a ``yaml.YAMLError``.
+    node allowance. A syntax error is still a ``yaml.YAMLError``,
+    and a scalar that cannot be built is a :class:`YamlScalarError`.
     """
     if isinstance(source, str):
         source_bytes = len(source.encode("utf-8", "surrogatepass"))

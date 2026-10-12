@@ -98,19 +98,33 @@ def _report_staged_fields(
     return None
 
 
+#: Longest piece of text taken from the file that a refusal quotes.
+_MAX_DETAIL_CHARS = 200
+
+
 def _refuse(message: str) -> None:
     """Print a one-line refusal and exit 1; the text may quote the file."""
     console.print(f"[red]{for_terminal(message)}[/]")
     raise SystemExit(1)
 
 
+def _clip(detail: str) -> str:
+    """``detail`` on one line, cut to ``_MAX_DETAIL_CHARS`` with an ellipsis."""
+    detail = " ".join(detail.split())
+    if len(detail) <= _MAX_DETAIL_CHARS:
+        return detail
+    return detail[:_MAX_DETAIL_CHARS] + "..."
+
+
 def _read_config_file(path: Path) -> object:
     """Load the YAML document at ``path``, or exit 1 naming what stopped it.
 
-    A file over a limit, a directory, bytes that are not UTF-8, a YAML
-    syntax error and a value YAML cannot build (a number of thousands of
-    digits) each get one line that names the file and the problem. A
-    missing file is left to the caller as ``FileNotFoundError``.
+    A file over a limit, a directory, a file the OS will not let us read, bytes
+    that are not UTF-8, a YAML syntax error and a value YAML cannot build (a
+    date that does not exist) each get one line that names the file and the
+    problem; text taken from the file is cut to ``_MAX_DETAIL_CHARS``. A
+    missing file is left to the caller as ``FileNotFoundError``, and any other
+    exception is passed on as itself.
     """
     what = f"Config file {path}"
     if path.is_dir():
@@ -125,12 +139,14 @@ def _read_config_file(path: Path) -> object:
         mark = getattr(exc, "problem_mark", None)
         problem = getattr(exc, "problem", None)
         if mark is not None and problem:
-            detail = f"{problem} (line {mark.line + 1}, column {mark.column + 1})"
+            detail = f"{_clip(problem)} (line {mark.line + 1}, column {mark.column + 1})"
         else:
-            detail = " ".join(str(exc).split())
+            detail = _clip(str(exc))
         _refuse(f"{what} is not valid YAML: {detail}")
-    except ValueError as exc:
-        _refuse(f"{what} holds a value that cannot be loaded: {' '.join(str(exc).split())}")
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        _refuse(f"{what} cannot be read: {exc.strerror or type(exc).__name__}")
     return None  # pragma: no cover - _refuse always raises
 
 

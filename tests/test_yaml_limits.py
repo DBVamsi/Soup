@@ -336,6 +336,13 @@ def _allowance(text: str) -> int:
         "c: {<<: {<<: {<<: {x: 1}, y: 2}, z: 3}}\n",
         "a: &a {}\nb: {<<: *a}\nc: {<<: []}\n",
         "c: {=: plain}\n",
+        "a: &a {<<: *a, x: 1}\n",
+        "a: &a {<<: [*a], x: 1}\n",
+        "a: &a {x: 1, <<: *a, y: 2}\n",
+        "a: &a {<<: *a, <<: *a, x: 1}\n",
+        "a: &a {<<: *a}\n",
+        "a: &a {x: 1}\nb: &b {<<: [*a, *b], y: 2}\n",
+        "a: &a {x: 1}\nb: &b {y: 2, <<: [*b, *a], <<: *b}\n",
         "? ab\n: 1\n",
     ],
 )
@@ -417,9 +424,33 @@ def test_merge_chain_past_the_limit_is_refused(links):
         load_yaml_limited(_merge_chain(links), "doc", max_bytes=10**6)
 
 
-def test_a_mapping_that_merges_itself_is_refused():
-    with pytest.raises(YamlLimitError, match="doc chains merge keys more than 100 levels"):
-        load_yaml_limited("a: &a {<<: *a}\n", "doc", max_bytes=64)
+def test_a_mapping_that_merges_itself_is_charged_like_any_merge():
+    """It loads as safe_load loads it, and its own pairs count towards the allowance."""
+    text = "a: &a {<<: *a, x: 1, y: 2}\n"
+    loader = yaml_limits._LimitedLoader(text, node_budget=10)
+    try:
+        assert loader.get_single_data() == yaml.safe_load(text) == {"a": {"x": 1, "y": 2}}
+        assert loader.merged_nodes == 4
+    finally:
+        loader.dispose()
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("d: 2026-02-30\n", "day is out of range for month"),
+        ("when:\n  - 2026-13-01\n", "month must be in 1..12"),
+    ],
+)
+def test_a_scalar_that_cannot_be_built_is_a_yaml_error_and_a_value_error(text, reason):
+    with pytest.raises(ValueError, match=reason):
+        yaml.safe_load(text)
+    with pytest.raises(yaml_limits.YamlScalarError) as raised:
+        load_yaml_limited(text, "doc", max_bytes=64)
+    assert isinstance(raised.value, yaml.YAMLError)
+    assert isinstance(raised.value, ValueError)
+    assert raised.value.problem == f"cannot build this value: {reason}"
+    assert raised.value.problem_mark.line == text.count("\n") - 1
 
 
 _MEASURE = """

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 
 import pytest
 import yaml
@@ -241,11 +242,67 @@ class TestConfigFile:
         (in_tmp / "soup.yaml").mkdir()
         assert _refused(capsys) == "Config file soup.yaml is a directory, not a file"
 
-    def test_a_number_too_long_to_build_is_one_line_that_names_the_file(self, in_tmp, capsys):
-        (in_tmp / "soup.yaml").write_text(_VALID + "extra: " + "7" * 5000 + "\n", encoding="utf-8")
+    def test_a_date_that_does_not_exist_is_one_line_that_names_the_place(self, in_tmp, capsys):
+        (in_tmp / "soup.yaml").write_text(_VALID + "extra: 2026-02-30\n", encoding="utf-8")
+        assert _refused(capsys) == (
+            "Config file soup.yaml is not valid YAML: cannot build this value: "
+            "day is out of range for month (line 12, column 8)"
+        )
+
+    @pytest.mark.skipif(
+        not hasattr(sys, "get_int_max_str_digits"), reason="no integer digit limit here"
+    )
+    def test_a_number_too_long_to_build_is_one_line_that_names_the_place(self, in_tmp, capsys):
+        text = _VALID + "extra: " + "7" * 5000 + "\n"
+        (in_tmp / "soup.yaml").write_text(text, encoding="utf-8")
         output = _refused(capsys)
-        assert output.startswith("Config file soup.yaml holds a value that cannot be loaded: ")
-        assert "4300" in output
+        assert output.startswith(
+            "Config file soup.yaml is not valid YAML: cannot build this value: "
+        )
+        assert output.endswith("(line 12, column 8)")
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "base: *" + "a" * 5000,
+            "base: !" + "t" * 5000 + " x",
+            "base: [" + "x" * 5000 + "\ntask: }",
+        ],
+        ids=["alias-name", "tag-name", "flow-text"],
+    )
+    def test_text_quoted_from_the_file_is_cut_to_two_hundred_characters(self, in_tmp, capsys, line):
+        (in_tmp / "soup.yaml").write_text(line + "\n", encoding="utf-8")
+        output = _refused(capsys)
+        prefix = "Config file soup.yaml is not valid YAML: "
+        assert output.startswith(prefix)
+        detail, _, place = output[len(prefix):].rpartition(" (line ")
+        assert place.endswith(")") and "column" in place
+        # Rich wraps the long word, so count it without the breaks.
+        assert len(detail.replace(" ", "")) <= loader._MAX_DETAIL_CHARS + 3
+        assert len(output) < 300
+
+    def test_a_long_detail_ends_with_an_ellipsis_and_a_short_one_does_not(self):
+        assert loader._MAX_DETAIL_CHARS == 200
+        assert loader._clip("a  b\n c") == "a b c"
+        assert loader._clip("x" * 200) == "x" * 200
+        assert loader._clip("x" * 201) == "x" * 200 + "..."
+
+    def test_a_file_the_system_will_not_open_is_one_line_with_the_reason(
+        self, in_tmp, capsys, monkeypatch
+    ):
+        def _denied(path, what, *, max_bytes):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(loader, "load_yaml_file_limited", _denied)
+        assert _refused(capsys) == "Config file soup.yaml cannot be read: Permission denied"
+
+    def test_an_error_that_is_not_about_the_file_is_passed_on_as_itself(self, in_tmp, monkeypatch):
+        def _broken(path, what, *, max_bytes):
+            raise ValueError("an internal mistake")
+
+        monkeypatch.setattr(loader, "load_yaml_file_limited", _broken)
+        with pytest.raises(ValueError, match="^an internal mistake$"):
+            load_config("soup.yaml")
 
     def test_a_path_with_control_characters_and_markup_is_printed_escaped(
         self, capsys, monkeypatch
@@ -332,6 +389,10 @@ class TestConfigText:
     def test_syntax_error_is_still_a_yaml_error(self):
         with pytest.raises(yaml.YAMLError):
             load_config_from_string("base: [unclosed\ntask: }\n")
+
+    def test_a_date_that_does_not_exist_is_still_a_value_error(self):
+        with pytest.raises(ValueError, match="cannot build this value: day is out of range"):
+            load_config_from_string(_VALID + "extra: 2026-02-30\n")
 
 
 class TestCallerWithItsOwnSizeLimit:
