@@ -35,6 +35,9 @@ release of torch or transformers cannot redden every open pull request at once.
 FULL and RELEASE install with no constraints, so the same release does show, on
 ``main``, within a day. A nightly run that was pinned by mistake would stay
 green for ever and say nothing; ``TestPinnedUpstream`` pins both directions.
+``TestEveryWorkflow`` holds the other workflows to the same rule: every job of
+every workflow that runs ``pip install`` is pinned on a pull request and a
+push, or is on a commented list of those that are not, for a checked reason.
 ``tests/test_ci_pinned_upstream.py`` checks the constraints file itself.
 
 Nothing here talks to GitHub. The workflow is read as YAML, the ``plan`` step's
@@ -56,6 +59,8 @@ from typing import Any
 
 import pytest
 import yaml
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / ".github" / "workflows" / "ci.yml"
@@ -1027,6 +1032,363 @@ class TestPinnedUpstream:
         assert CONSTRAINTS_OUTPUT not in installs[0]
         for environment in _environments(workflow):
             assert "PIP_CONSTRAINT" not in {str(key).upper() for key in environment}
+
+
+# --- Every workflow, not only ci.yml ------------------------------------------
+#
+# ci.yml is not the only workflow that installs the project. The two recipe
+# workflows install `.[dev]` and `.[train]` on a pull request, behind a path filter,
+# and they went on resolving the newest release there after ci.yml had stopped. So
+# every job of every workflow that runs `pip install` is in exactly one of three
+# places: a switched job of ci.yml, PINNED_ON_PR_AND_PUSH, or UNPINNED_ON_PURPOSE
+# with the reason that makes it safe -- and the reason is checked, not trusted.
+
+WORKFLOWS = ROOT / ".github" / "workflows"
+PR_AND_PUSH = frozenset({"pull_request", "push"})
+
+#: Jobs outside ci.yml that install torch or transformers on a pull request or a push.
+#: They have no ``plan``: on those two events their ``pip install`` names the pinned file
+#: itself, and on any other event the workflow has (a manual run) it resolves the newest.
+PINNED_ON_PR_AND_PUSH = frozenset(
+    {
+        ("recipe-validation.yml", "validate-recipes"),
+        ("recipe-attach.yml", "verify"),
+    }
+)
+
+FLOOR, TOOL, CORE, NEWEST = "floor", "tool", "core", "newest"
+#: Every other job that runs ``pip install``, and why it may do so without the pinned
+#: file. ``_why_not`` holds each entry to its reason.
+UNPINNED_ON_PURPOSE = {
+    # FLOOR: its purpose is the lower bound, so it installs under its own exact file.
+    (CI.name, FLOOR_JOB): FLOOR,
+    # TOOL: one tool and nothing of the stack (ruff, mypy, an exact ruff, build). The
+    # project is not installed and no pinned package is asked for by name.
+    (CI.name, "lint"): TOOL,
+    (CI.name, "type-check"): TOOL,
+    ("merge-freshness.yml", "gate"): TOOL,
+    ("merge-freshness.yml", "reeval-open-prs"): TOOL,
+    ("publish.yml", "publish"): TOOL,
+    # CORE: the project with no extra, so no torch and no transformers to pin.
+    ("codspeed.yml", "benchmark"): CORE,
+    # NEWEST: started by a schedule or by hand, never by a pull request or a push, and
+    # there to meet the newest release.
+    ("dependency-drift.yml", "latest-stack"): NEWEST,
+    ("recipe-repo-ids.yml", "resolve"): NEWEST,
+}
+
+
+def _workflows() -> dict[str, dict[str, Any]]:
+    """Every workflow file, parsed, by file name."""
+    found = {}
+    for path in sorted(WORKFLOWS.iterdir()):
+        if path.suffix in (".yml", ".yaml"):
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            assert isinstance(data, dict) and isinstance(data.get("jobs"), dict), path.name
+            found[path.name] = data
+    return found
+
+
+def _events(workflow: dict[str, Any]) -> set[str]:
+    """The events a workflow starts on. PyYAML reads the bare key ``on`` as ``True``."""
+    triggers = workflow.get("on", workflow.get(True))
+    return {triggers} if isinstance(triggers, str) else set(triggers or ())
+
+
+_EXPRESSION = re.compile(r"(\$\{\{.*?\}\})", re.DOTALL)
+_PIP_INSTALL = re.compile(r"\bpip3?\s+install\b")
+_PROJECT_SPEC = re.compile(r"\.(?:\[([^\]]*)\])?")
+#: pip options whose value is the next argument, and is not something to install.
+_PIP_VALUE_OPTIONS = frozenset(
+    {
+        "-c",
+        "--constraint",
+        "-r",
+        "--requirement",
+        "-i",
+        "--index-url",
+        "--extra-index-url",
+        "-f",
+        "--find-links",
+        "-t",
+        "--target",
+    }
+)
+
+
+def _shell_commands(run: str) -> list[str]:
+    """*run* split into its commands: on newlines, ``&&``, ``||`` and ``;``, but never
+    inside a ``${{ }}`` expression, which spells its own operators the same way."""
+    commands = [""]
+    for index, part in enumerate(_EXPRESSION.split(run)):
+        if index % 2:  # an expression: it belongs to the command it sits in
+            commands[-1] += part
+            continue
+        first, *rest = re.split(r"\n|&&|\|\||;", part)
+        commands[-1] += first
+        commands.extend(rest)
+    return [command.strip() for command in commands if command.strip()]
+
+
+def _pip_commands(job: dict[str, Any]) -> list[str]:
+    """Every command of *job* that runs ``pip install``, its expressions not yet rendered."""
+    commands = []
+    for step in job.get("steps", []):
+        if "python" in str(step.get("shell", "")):
+            continue  # a script for another interpreter, not a command line
+        for command in _shell_commands(str(step.get("run", ""))):
+            if _PIP_INSTALL.search(command):
+                commands.append(command)
+    return commands
+
+
+def _requested(command: str) -> tuple[set[str], set[str] | None]:
+    """What a rendered ``pip install`` asks for: the canonical names it spells out, and the
+    extras of the project it installs -- an empty set for a bare ``.``, ``None`` when the
+    project is not installed at all."""
+    args = shlex.split(command, comments=True)
+    assert "install" in args, command
+    names: set[str] = set()
+    extras: set[str] | None = None
+    skip = False
+    for arg in args[args.index("install") + 1 :]:
+        if skip:
+            skip = False
+        elif arg in _PIP_VALUE_OPTIONS:
+            skip = True
+        elif arg.startswith("-"):
+            continue  # `-e` too: its value is read like any other argument
+        elif (project := _PROJECT_SPEC.fullmatch(arg)) is not None:
+            listed = {extra.strip() for extra in (project.group(1) or "").split(",")}
+            extras = (extras or set()) | (listed - {""})
+        else:
+            try:
+                names.add(canonicalize_name(Requirement(arg).name))
+            except InvalidRequirement:
+                continue  # a path that is not the project
+    return names, extras
+
+
+def _pinned_names() -> set[str]:
+    """The packages the constraints file pins; its format is checked in
+    ``tests/test_ci_pinned_upstream.py``."""
+    lines = (ROOT / PINNED_CONSTRAINTS).read_text(encoding="utf-8").splitlines()
+    names = {
+        canonicalize_name(line.split("==")[0].strip())
+        for line in lines
+        if "==" in line and not line.startswith("#")
+    }
+    assert names, f"{PINNED_CONSTRAINTS} pins nothing"
+    return names
+
+
+def _contexts(workflow: dict[str, Any]) -> list[dict[str, Any]]:
+    """One context per event the workflow starts on and per choice ``plan`` can make."""
+    return [
+        {
+            "github": {"event_name": event},
+            "needs": {"plan": {"outputs": {"constraints": chosen}}},
+        }
+        for event in sorted(_events(workflow))
+        for chosen in (f"-c {PINNED_CONSTRAINTS}", "")
+    ]
+
+
+def _why_not(kind: str, workflow: dict[str, Any], job: dict[str, Any]) -> list[str]:
+    """What is wrong with *job* installing unpinned for the reason *kind*; empty if it holds."""
+    assert kind in (FLOOR, TOOL, CORE, NEWEST), kind
+    problems = set()
+    started_by = _events(workflow) & {*PR_AND_PUSH, "pull_request_target"}
+    if kind == NEWEST and started_by:
+        problems.add(f"starts on {sorted(started_by)}, where the newest release must not decide")
+    pinned = _pinned_names()
+    for context in _contexts(workflow):
+        for command in _pip_commands(job):
+            rendered = _render(command, context)
+            names, extras = _requested(rendered)
+            files = _constraint_files(rendered)
+            if kind == FLOOR and files != [FLOOR_CONSTRAINTS]:
+                problems.add(f"is not under its floor file alone: {rendered}")
+            if kind == NEWEST and files:
+                problems.add(f"is constrained, and so does not meet the newest: {rendered}")
+            if kind == TOOL and extras is not None:
+                problems.add(f"installs the project: {rendered}")
+            if kind == CORE and extras:
+                problems.add(f"installs the extra {sorted(extras)}: {rendered}")
+            if kind in (TOOL, CORE) and names & pinned:
+                problems.add(f"asks for {sorted(names & pinned)} by name, unpinned: {rendered}")
+    return sorted(problems)
+
+
+def pinned_job_extras() -> set[str]:
+    """The extras of the project that a pinned job installs, read off the workflows.
+
+    ``tests/test_ci_pinned_upstream.py`` holds every pin to the bounds these extras
+    declare and to no others: an extra that no pinned job installs cannot make a
+    pull-request cell unresolvable.
+    """
+    workflows = _workflows()
+    context = {
+        "github": {"event_name": "pull_request"},
+        "needs": {"plan": {"outputs": {"constraints": f"-c {PINNED_CONSTRAINTS}"}}},
+    }
+    extras: set[str] = set()
+    for file, name in {*((CI.name, job) for job in SWITCHED_JOBS), *PINNED_ON_PR_AND_PUSH}:
+        for command in _pip_commands(workflows[file]["jobs"][name]):
+            extras |= _requested(_render(command, context))[1] or set()
+    return extras
+
+
+def _synthetic(run: str, *events: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A one-job workflow that starts on *events* and runs *run*."""
+    job = {"steps": [{"uses": "actions/checkout@v4"}, {"run": run}]}
+    return {"on": {event: None for event in events}, "jobs": {"job": job}}, job
+
+
+class TestEveryWorkflow:
+    """Every job of every workflow that runs ``pip install`` is pinned on a pull request
+    and a push, or is on the commented list of those that are not, for a checked reason."""
+
+    def test_the_readers_have_teeth(self):
+        """CONTROL for every test of this class."""
+        expression = "${{ (a == 'x' || a == 'y') && '-c f.txt' || '' }}"
+        assert _shell_commands(f"pip install -e . {expression}\npytest -q && echo ok; ls") == [
+            f"pip install -e . {expression}",
+            "pytest -q",
+            "echo ok",
+            "ls",
+        ]
+        job = {
+            "steps": [
+                {"run": "python -m pip install --upgrade pip && pip install -e '.[dev]'"},
+                {"shell": "python", "run": "print('pip install nothing')"},
+                {"run": "pytest tests/"},
+                {"uses": "actions/checkout@v4"},
+            ]
+        }
+        assert _pip_commands(job) == [
+            "python -m pip install --upgrade pip",
+            "pip install -e '.[dev]'",
+        ]
+        assert _requested('pip install -e ".[dev, qat]" "torch>=2.6.0" -c pins.txt') == (
+            {"torch"},
+            {"dev", "qat"},
+        )
+        assert _requested("pip install -e . pytest Pytest_Codspeed") == (
+            {"pytest", "pytest-codspeed"},
+            set(),
+        )
+        assert _requested("pip install '.[train]' -r reqs.txt") == (set(), {"train"})
+        assert _requested("pip install ruff==0.16.0 -e ./vendor/x") == ({"ruff"}, None)
+        assert _events({True: {"push": None, "schedule": []}}) == {"push", "schedule"}
+        assert _events({"on": ["push", "pull_request"]}) == {"push", "pull_request"}
+        assert _events({"on": "workflow_dispatch"}) == {"workflow_dispatch"}
+        assert {"torch", "transformers", "huggingface-hub"} <= _pinned_names()
+
+    @pytest.mark.parametrize(
+        ("kind", "run", "events", "problem"),
+        [
+            (TOOL, "pip install ruff", ("pull_request",), None),
+            (TOOL, 'pip install -e ".[dev]"', ("pull_request",), "installs the project"),
+            (TOOL, "pip install -e . ruff", ("push",), "installs the project"),
+            (TOOL, "pip install ruff && pip install -U torch", ("push",), "by name, unpinned"),
+            (TOOL, "pip install huggingface_hub", ("schedule",), "by name, unpinned"),
+            (CORE, "pip install -e . pytest", ("pull_request",), None),
+            (CORE, 'pip install -e ".[train]" pytest', ("pull_request",), "installs the extra"),
+            (CORE, "pip install -e . transformers", ("pull_request",), "by name, unpinned"),
+            (NEWEST, 'pip install -e ".[dev,audio]"', ("schedule", "workflow_dispatch"), None),
+            (NEWEST, 'pip install -e ".[dev]"', ("schedule", "pull_request"), "starts on"),
+            (NEWEST, 'pip install -e ".[dev]"', ("push",), "starts on"),
+            (NEWEST, 'pip install -e ".[dev]"', ("pull_request_target",), "starts on"),
+            (NEWEST, 'pip install -e ".[dev]" -c x.txt', ("schedule",), "is constrained"),
+            (FLOOR, f'pip install -e ".[dev]" -c {FLOOR_CONSTRAINTS}', ("push",), None),
+            (FLOOR, 'pip install -e ".[dev]"', ("push",), "not under its floor file"),
+            (FLOOR, f'pip install -e ".[dev]" -c {PINNED_CONSTRAINTS}', ("push",), "not under"),
+        ],
+    )
+    def test_a_reason_is_checked_and_not_trusted(self, kind, run, events, problem):
+        """CONTROL: listing a job as unpinned on purpose does not make it so."""
+        workflow, job = _synthetic(run, *events)
+        problems = _why_not(kind, workflow, job)
+        if problem is None:
+            assert problems == []
+        else:
+            assert any(problem in found for found in problems), problems
+
+    def test_every_job_that_runs_pip_install_is_on_exactly_one_list(self):
+        """A new workflow that installs `.[dev]` or `.[train]` on a pull request lands here:
+        it is on no list until someone pins it, or writes down why it need not be."""
+        found = {
+            (file, name)
+            for file, workflow in _workflows().items()
+            for name, job in workflow["jobs"].items()
+            if _pip_commands(job)
+        }
+        switched = {(CI.name, job) for job in SWITCHED_JOBS}
+        unpinned = set(UNPINNED_ON_PURPOSE)
+        assert not switched & PINNED_ON_PR_AND_PUSH
+        assert not (switched | PINNED_ON_PR_AND_PUSH) & unpinned
+        classified = switched | PINNED_ON_PR_AND_PUSH | unpinned
+        assert sorted(found - classified) == [], (
+            "these jobs run `pip install` and are on no list: give them the pinned stack "
+            "(PINNED_ON_PR_AND_PUSH) or say why not (UNPINNED_ON_PURPOSE)"
+        )
+        assert sorted(classified - found) == [], "listed, but no such job runs `pip install`"
+
+    @pytest.mark.parametrize(("file", "name"), sorted(PINNED_ON_PR_AND_PUSH))
+    def test_a_job_outside_ci_installs_the_pinned_stack_on_a_pull_request_and_a_push(
+        self, file, name
+    ):
+        """Every `pip install` of the job, on every event the workflow starts on: the pinned
+        file on a pull request and a push, no constraint on a manual run."""
+        workflow = _workflows()[file]
+        events = _events(workflow)
+        assert events & PR_AND_PUSH, f"{file} starts on neither: it belongs on the NEWEST list"
+        commands = _pip_commands(workflow["jobs"][name])
+        assert commands, (file, name)
+        for event in sorted(events):
+            expected = [PINNED_CONSTRAINTS] if event in PR_AND_PUSH else []
+            for command in commands:
+                rendered = _render(command, {"github": {"event_name": event}})
+                assert _constraint_files(rendered) == expected, (event, rendered)
+
+    @pytest.mark.parametrize(("file", "name"), sorted(PINNED_ON_PR_AND_PUSH))
+    def test_a_pin_bump_starts_the_path_filtered_job(self, file, name):
+        """A pull request that only moves a pin has to run every job that installs under
+        it. Filtered out, a bad pin fails the next unrelated pull request to touch a recipe."""
+        workflow = _workflows()[file]
+        triggers = workflow.get("on", workflow.get(True))
+        filtered = 0
+        for event in sorted(PR_AND_PUSH & set(triggers)):
+            trigger = triggers[event] or {}
+            assert "paths-ignore" not in trigger, (file, event)
+            if "paths" in trigger:
+                filtered += 1
+                assert PINNED_CONSTRAINTS in trigger["paths"], (file, event)
+        assert filtered, f"{file} has no path filter left: drop it from this test's reach"
+
+    @pytest.mark.parametrize("job", SWITCHED_JOBS)
+    def test_every_pip_install_of_a_switched_job_ends_with_what_plan_chose(self, job):
+        """Not only the one that installs the project: a later `pip install --upgrade torch`
+        in the same job would undo the pin on a pull request without touching that line."""
+        commands = _pip_commands(_jobs()[job])
+        assert commands, job
+        for chosen, expected in ((f"-c {PINNED_CONSTRAINTS}", [PINNED_CONSTRAINTS]), ("", [])):
+            context = {"needs": {"plan": {"outputs": {"constraints": chosen}}}}
+            for command in commands:
+                rendered = _render(command, context)
+                assert _constraint_files(rendered) == expected, rendered
+
+    @pytest.mark.parametrize(("file", "name"), sorted(UNPINNED_ON_PURPOSE))
+    def test_an_unpinned_install_is_what_its_reason_says(self, file, name):
+        workflow = _workflows()[file]
+        kind = UNPINNED_ON_PURPOSE[(file, name)]
+        assert _why_not(kind, workflow, workflow["jobs"][name]) == [], (file, name, kind)
+
+    def test_the_extras_the_pinned_jobs_install(self):
+        """What `tests/test_ci_pinned_upstream.py` checks the pins against. A job that starts
+        installing another extra adds its bounds to that check; update this with it."""
+        assert pinned_job_extras() == {"dev", "qat", "mlx", "train"}
 
 
 class TestADraftRunsNothing:

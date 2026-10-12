@@ -570,11 +570,15 @@ draft, whatever is pushed to it. Mark it ready for review and the quick set
 starts on its current head.
 
 **Pull-request CI installs a pinned upstream stack.** On a pull request and on a
-push to `main`, every job that installs the project takes torch, transformers
-and the packages they resolve with at the exact versions in
+push to `main`, every job that installs torch or transformers (the test cells,
+the smoke jobs, `Recipe Validation` and `recipe attach`) takes them and the
+packages they resolve with at the exact versions in
 `.github/constraints/pinned-upstream.txt`, so a release upstream cannot turn
-every open pull request red at once. The nightly run on `main` installs with no
-constraints, and that is where a new release shows first. If your change moves a
+every open pull request red at once. The one exception is `transformers-floor`,
+which installs its own exact floor, and packages outside that file (numpy,
+pydantic, mlx, torchao, ...) still resolve the newest on every run. The nightly
+run on `main` installs with no constraints, and that is where a new release of
+a pinned package shows first. If your change moves a
 bound in `pyproject.toml` past one of those pins, move the pin in the same pull
 request: `tests/test_ci_pinned_upstream.py` names the pin, and the header of the
 constraints file says how to pick the new version.

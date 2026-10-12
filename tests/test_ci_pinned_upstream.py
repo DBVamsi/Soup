@@ -16,9 +16,10 @@ event, through the step's own shell. This file pins the constraints file itself:
 * one line per package, an exact ``name==version`` and nothing else, no package twice --
   a range or a bare name is a pin that pins nothing, and a second line for one package is
   at best noise and at worst two pins ``pip`` cannot satisfy together;
-* every pinned version inside every bound ``pyproject.toml`` declares for that package --
-  outside it, ``pip`` cannot resolve the cell at all, so a pull request that moves a bound
-  moves the pin with it.
+* every pinned version inside every bound ``pyproject.toml`` declares for that package,
+  in its core dependencies and in the extras a pinned job installs (read off the
+  workflows) -- outside one, ``pip`` cannot resolve the cell at all, so a pull request
+  that moves a bound moves the pin with it. An extra no pinned job installs is not read.
 
 ``pyproject.toml`` is read with regular expressions, not ``tomllib``, which is 3.11+ while
 this repository supports 3.10: the convention of ``tests/test_requires_python_bound.py``.
@@ -27,12 +28,15 @@ this repository supports 3.10: the convention of ``tests/test_requires_python_bo
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
+
+from tests.test_ci_full_matrix_on_approval import pinned_job_extras
 
 ROOT = Path(__file__).resolve().parents[1]
 PINNED = ROOT / ".github" / "constraints" / "pinned-upstream.txt"
@@ -120,21 +124,59 @@ def _committed_pins() -> dict[str, str]:
 # --- Reading pyproject.toml -----------------------------------------------------
 
 
-def _declared(text: str) -> dict[str, list[Requirement]]:
-    """Every requirement ``pyproject.toml`` declares, core and extras, by canonical name."""
+#: The project's own name: an extra that lists ``soup-cli[train]`` installs ``train`` too.
+PROJECT = "soup-cli"
+
+
+def _requirements(block: str) -> list[Requirement]:
+    """Every quoted requirement in a block of pyproject.toml, comment lines left out."""
+    code = "\n".join(line for line in block.splitlines() if not line.lstrip().startswith("#"))
+    return [Requirement(raw) for raw in re.findall(r'"([^"\n]+)"', code)]
+
+
+def _extras(text: str) -> dict[str, list[Requirement]]:
+    """The ``[project.optional-dependencies]`` table: each extra with its requirements."""
+    table = re.search(r"^\[project\.optional-dependencies\]\n(.*?)(?=^\[)", text, re.M | re.S)
+    assert table is not None, "pyproject.toml has no [project.optional-dependencies] table"
+    code = "\n".join(
+        line for line in table.group(1).splitlines() if not line.lstrip().startswith("#")
+    )
+    # An array ends at a `]` that ends its line; the `]` of `soup-cli[train]` does not.
+    arrays = re.findall(r"^([A-Za-z0-9_-]+)\s*=\s*\[(.*?)\]\s*$", code, re.M | re.S)
+    return {canonicalize_name(name): _requirements(body) for name, body in arrays}
+
+
+def _declared(text: str, installed: Iterable[str]) -> dict[str, list[Requirement]]:
+    """What a cell that installs the *installed* extras is bound by, by canonical name.
+
+    The core dependencies, and each of those extras followed through self-references such
+    as ``soup-cli[train,mcp,data]``. An extra that is not installed is not read.
+    """
     core = re.search(r"^dependencies\s*=\s*\[\n(.*?)^\]", text, re.M | re.S)
     assert core is not None, "pyproject.toml has no [project] dependencies array"
-    extras = re.search(r"^\[project\.optional-dependencies\]\n(.*?)(?=^\[)", text, re.M | re.S)
-    assert extras is not None, "pyproject.toml has no [project.optional-dependencies] table"
+    requirements = _requirements(core.group(1))
+    table = _extras(text)
+    pending = [canonicalize_name(extra) for extra in installed]
+    seen: set[str] = set()
+    while pending:
+        extra = pending.pop()
+        if extra in seen:
+            continue
+        seen.add(extra)
+        assert extra in table, f"pyproject.toml declares no extra `{extra}`: {sorted(table)}"
+        for requirement in table[extra]:
+            requirements.append(requirement)
+            if canonicalize_name(requirement.name) == PROJECT:
+                pending.extend(canonicalize_name(inner) for inner in requirement.extras)
     declared: dict[str, list[Requirement]] = {}
-    for block in (core.group(1), extras.group(1)):
-        code = "\n".join(
-            line for line in block.splitlines() if not line.lstrip().startswith("#")
-        )
-        for raw in re.findall(r'"([^"\n]+)"', code):
-            requirement = Requirement(raw)
-            declared.setdefault(canonicalize_name(requirement.name), []).append(requirement)
+    for requirement in requirements:
+        declared.setdefault(canonicalize_name(requirement.name), []).append(requirement)
     return declared
+
+
+def _bounds() -> dict[str, list[Requirement]]:
+    """The bounds on the committed tree: core plus the extras the pinned jobs install."""
+    return _declared(PYPROJECT.read_text(encoding="utf-8"), pinned_job_extras())
 
 
 def _out_of_bounds(pins: dict[str, str], declared: dict[str, list[Requirement]]) -> list[str]:
@@ -256,7 +298,7 @@ class TestTheCommittedFile:
 class TestPinsLieInsideTheDeclaredBounds:
     def test_the_bounds_of_the_declared_stack_were_found(self):
         """CONTROL: an empty reading of pyproject.toml would pass the check below."""
-        declared = _declared(PYPROJECT.read_text(encoding="utf-8"))
+        declared = _bounds()
         missing = DECLARED_IN_PYPROJECT - set(declared)
         assert not missing, f"no declaration found in pyproject.toml for {sorted(missing)}"
         unbounded = sorted(
@@ -267,9 +309,7 @@ class TestPinsLieInsideTheDeclaredBounds:
         assert not unbounded, f"{unbounded} are declared with no version bound at all"
 
     def test_every_pin_is_inside_every_bound_pyproject_declares_for_it(self):
-        problems = _out_of_bounds(
-            _committed_pins(), _declared(PYPROJECT.read_text(encoding="utf-8"))
-        )
+        problems = _out_of_bounds(_committed_pins(), _bounds())
         assert not problems, (
             "; ".join(problems)
             + ". pip cannot resolve a pull-request cell under such a pin. Move the pin "
@@ -295,27 +335,60 @@ class TestPinsLieInsideTheDeclaredBounds:
             f"{name}=={version} is outside pyproject.toml's `{requirement}`"
         ]
 
-    def test_a_pin_is_checked_against_every_extra_that_declares_the_package(self):
-        declared = _declared(
-            "[project]\n"
-            "dependencies = [\n"
-            '    "huggingface-hub>=0.16.0",\n'
-            "]\n\n"
-            "[project.optional-dependencies]\n"
-            "train = [\n"
-            "    # a comment with a \"quoted\" word\n"
-            '    "transformers>=5.16.1,<6.0.0",\n'
-            "]\n"
-            'mlx = ["mlx-lm>=0.31.3", "transformers>=5.20.0,<6.0.0"]\n'
-            "\n[project.scripts]\n"
-        )
-        assert sorted(declared) == ["huggingface-hub", "mlx-lm", "transformers"]
+    PYPROJECT_LIKE = (
+        "[project]\n"
+        "dependencies = [\n"
+        '    "huggingface-hub>=0.16.0",\n'
+        "]\n\n"
+        "[project.optional-dependencies]\n"
+        "train = [\n"
+        "    # a comment with a \"quoted\" word\n"
+        '    "transformers>=5.16.1,<6.0.0",\n'
+        "]\n"
+        'dev = ["soup-cli[train,data]", "pytest>=7.0"]\n'
+        'data = ["datasketch>=1.6.0"]\n'
+        'mlx = ["mlx-lm>=0.31.3", "transformers>=5.20.0,<6.0.0"]\n'
+        'legacy = ["transformers<5.0.0", "optimum[onnxruntime]>=1.16.0"]\n'
+        "\n[project.scripts]\n"
+    )
+
+    def test_a_pin_is_checked_against_every_installed_extra_that_declares_the_package(self):
+        """Through the self-reference too: `dev` installs `train`, so `train` binds."""
+        declared = _declared(self.PYPROJECT_LIKE, {"dev", "mlx"})
+        assert sorted(declared) == [
+            "datasketch",
+            "huggingface-hub",
+            "mlx-lm",
+            "pytest",
+            "soup-cli",
+            "transformers",
+        ]
         assert len(declared["transformers"]) == 2
         narrower = Requirement("transformers>=5.20.0,<6.0.0")
         assert _out_of_bounds({"transformers": "5.19.0"}, declared) == [
             f"transformers==5.19.0 is outside pyproject.toml's `{narrower}`"
         ]
         assert _out_of_bounds({"transformers": "5.20.1", "tokenizers": "0.23.3"}, declared) == []
+
+    def test_an_extra_no_pinned_job_installs_cannot_fail_the_check(self):
+        """`legacy` wants transformers below 5. No cell installs it, so it binds no cell."""
+        assert sorted(_extras(self.PYPROJECT_LIKE)) == ["data", "dev", "legacy", "mlx", "train"]
+        only_dev = _declared(self.PYPROJECT_LIKE, {"dev"})
+        assert _out_of_bounds({"transformers": "5.19.0"}, only_dev) == []
+        with_legacy = _declared(self.PYPROJECT_LIKE, {"dev", "legacy"})
+        assert len(_out_of_bounds({"transformers": "5.19.0"}, with_legacy)) == 1
+        with pytest.raises(AssertionError, match="declares no extra `nope`"):
+            _declared(self.PYPROJECT_LIKE, {"nope"})
+
+    def test_the_real_extras_are_read_and_followed(self):
+        """CONTROL on the committed pyproject.toml: `dev` reaches torch through `train`,
+        `mlx` alone does not, and both bound transformers."""
+        text = PYPROJECT.read_text(encoding="utf-8")
+        assert {"train", "dev", "mlx", "qat"} <= set(_extras(text))
+        assert "torch" in _declared(text, {"dev"})
+        assert "torch" not in _declared(text, {"mlx"})
+        assert "transformers" in _declared(text, {"mlx"})
+        assert set(_bounds()) >= DECLARED_IN_PYPROJECT
 
 
 # --- Contributors are told ------------------------------------------------------
