@@ -30,6 +30,7 @@ import typer
 
 from soup_cli.config.backend_support import REGISTRY as _REGISTRY
 from soup_cli.config.schema import DataConfig, TrainingConfig
+from tests._source_scan import memoized_scan
 from tests.conftest import strip_ansi
 
 MLX_SFT = pathlib.Path(__file__).resolve().parents[1] / (
@@ -460,7 +461,20 @@ def test_doctor_without_config_does_not_read_one(config_at, capsys):
 
 def _fields_read_by(path: pathlib.Path) -> set[str]:
     """Attribute names and exact string constants in a module, docstrings out."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return _names_read_in(path.read_text(encoding="utf-8"))
+
+
+@memoized_scan
+def _names_read_in(source: str) -> set[str]:
+    """The scan behind ``_fields_read_by``, run once per distinct module text.
+
+    ``_registry_drift`` asks for every module under ``src/`` once per registry pair,
+    and three tests run it on the real tree: twelve parses of the package for one
+    answer. Keyed on the text, so the synthetic trees the tests below write are each
+    scanned for what they contain. ``ast.parse`` and not the shared tree, because the
+    first loop edits what it walks.
+    """
+    tree = ast.parse(source)
     for node in ast.walk(tree):
         if isinstance(
             node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)

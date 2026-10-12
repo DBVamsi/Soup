@@ -195,6 +195,8 @@ Accepted runs are recorded in [`benchmarks/gpu-test-runs.md`](benchmarks/gpu-tes
 
 > A representative sample of the suite below. Run `pytest tests/ -v` for the complete list.
 
+Name a new test file after the module or feature it covers (`test_<module>.py`), not after
+an issue number or a version. Existing test files keep their names.
 
 | File | Covers |
 |------|--------|
@@ -411,6 +413,13 @@ For each user-visible pull request, add its entry to
 use the newest released version in `CHANGELOG.md`, prefer the PR number rather than the
 issue it closes, and choose `added`, `changed`, `deprecated`, `removed`, `fixed`, or
 `security`.
+
+If you add or remove a CLI command, option, argument or a `soup.yaml` field, or change its
+type, default or bounds, run `python scripts/gen_reference_docs.py` and commit the pages
+it rewrites (`docs/cli-reference.md`, `docs/config-reference.md`); the tests fail until
+you do and name what differs. Rewording a help string or a description needs nothing:
+maintainers regenerate the wording at release. On a merge conflict in either generated
+page, keep either side and re-run `python scripts/gen_reference_docs.py`.
 
 ### 3. Run Tests & Lint
 
