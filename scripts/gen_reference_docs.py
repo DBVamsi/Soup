@@ -68,7 +68,7 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
 _SCRIPT_REPO_ROOT = Path(__file__).resolve().parent.parent
-#: Where the pages are read and written. Tests point this at a scratch tree.
+#: Where the pages are read and written. Tests set this to a scratch tree.
 _REPO_ROOT = _SCRIPT_REPO_ROOT
 
 CONFIG_PAGE = "docs/config-reference.md"

@@ -1325,6 +1325,7 @@ def test_the_leak_check_reads_whole_paths_only() -> None:
     text = "default `./data/train.jsonl`; /home/someone/.soup; C:\\Users\\someone\\x; /repository"
     shallow = [PurePosixPath("/data"), PurePosixPath("/repo"), PurePosixPath("/")]
     assert _leaked_paths(text, shallow) == []
+    assert _leaked_paths("mounted at /data, cloned to /repo", shallow) == []
     assert _leaked_paths(text, [PurePosixPath("/home/someone")]) == ["/home/someone"]
     assert _leaked_paths(text, [PureWindowsPath("C:\\Users\\someone")]) == ["C:\\Users\\someone"]
     assert _leaked_paths("see ./home/someone/x", [PurePosixPath("/home/someone")]) == []
@@ -1417,9 +1418,11 @@ def test_an_external_link_in_a_description_is_not_a_broken_file() -> None:
     class Linked(BaseModel):
         rate: float = Field(default=0.1, description="See [the guide](https://example.com/lr).")
         mail: str = Field(default="", description="Ask [us](mailto:team@example.com) or (x)[y].")
+        page: str = Field(default="", description="Raw: [md](https://example.com/guide.md#lr).")
+        logo: str = Field(default="", description="A picture, ![logo](assets/none.png).")
 
     page = gen.render_config_reference(Linked)
-    assert "https://example.com/lr" in page
+    assert "https://example.com/lr" in page and "assets/none.png" in page
     assert "#top-level-keys" in _internal_targets(page)
     assert [target for target in _internal_targets(page) if ":" in target] == []
     assert _broken_links(page) == []
@@ -1622,7 +1625,7 @@ def test_a_shallow_working_directory_marks_nothing(monkeypatch: pytest.MonkeyPat
         ("snake_case_name stays", "snake_case_name stays"),
         ("_private and __dunder__", "\\_private and \\_\\_dunder\\_\\_"),
         ("bounded in ~[0,1] (a probability)", "bounded in \\~\\[0,1] (a probability)"),
-        ("costs $5 and R&D &lt;", "costs \\$5 and R&amp;D &amp;lt;"),
+        ("a $x$ sum and R&D &lt;", "a \\$x\\$ sum and R&amp;D &amp;lt;"),
         ("a lone ` backtick and a \\ slash", "a lone \\` backtick and a \\\\ slash"),
         ("", ""),
     ],
