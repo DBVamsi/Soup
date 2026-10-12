@@ -10,7 +10,8 @@ and the limit, when it crosses one of three:
 * **nesting** -- collections nest at most :data:`MAX_YAML_NESTING` levels,
   whether written out or reached through aliases;
 * **expansion** -- the loaded object has at most one node per source byte plus
-  :data:`ALIAS_EXPANSION_SLACK`.
+  :data:`ALIAS_EXPANSION_SLACK`, and so have the pairs that merge keys (``<<``)
+  copy into mappings while the document is being built.
 
 The expansion rule exists because YAML anchors and aliases let a few hundred
 bytes of text describe a graph in which one list is referenced many times over.
@@ -29,9 +30,13 @@ The limit is tied to the size of the source rather than fixed: a YAML document
 without aliases needs at least one byte per node (``{a,b}`` is five bytes and
 five nodes; nothing denser parses), so an alias-free document always passes
 :func:`check_yaml_expanded_size`, whatever legitimate content it carries. Only
-aliases can make a document expand to more nodes than it has bytes, and with
-the rule below the work done after loading stays proportional to the source
-size, which the reader already caps.
+aliases can make a document expand to more nodes than it has bytes. They do
+it in two places: in the loaded object, which is measured after loading, and
+in merge keys, where PyYAML copies the pairs of every merged mapping into the
+mapping that names it before any object exists. The loader charges those
+copies to the same allowance as they are made and stops at the first pair
+past it, so the work done during and after loading stays proportional to the
+source size, which the reader already caps.
 """
 
 from __future__ import annotations
@@ -156,6 +161,13 @@ def check_expanded_nodes(obj: object, what: str, *, limit: int) -> None:
         raise ValueError(f"{what} expands to more than {limit} nodes; refusing")
 
 
+def _expansion_error(what: str, limit: int, source_bytes: int) -> YamlLimitError:
+    return YamlLimitError(
+        f"{what} expands to more than {limit} nodes from {source_bytes} "
+        "bytes of YAML; refusing"
+    )
+
+
 def _nesting_error(what: str) -> YamlLimitError:
     return YamlLimitError(
         f"{what} nests collections more than {MAX_YAML_NESTING} levels deep; refusing"
@@ -175,27 +187,47 @@ def check_yaml_expanded_size(obj: object, what: str, *, source_bytes: int) -> No
     if depth > MAX_YAML_NESTING:
         raise _nesting_error(what)
     if nodes > limit:
-        raise YamlLimitError(
-            f"{what} expands to more than {limit} nodes from {source_bytes} "
-            "bytes of YAML; refusing"
-        )
+        raise _expansion_error(what, limit, source_bytes)
 
 
 class _TooDeepError(Exception):
     """Raised while parsing when collections nest past the limit."""
 
 
-class _NestingLimitedLoader(yaml.SafeLoader):
-    """``yaml.SafeLoader`` that stops at :data:`MAX_YAML_NESTING` open collections.
+class _MergeChainError(Exception):
+    """Raised while building when merge keys chain past the limit."""
+
+
+class _MergeBudgetError(Exception):
+    """Raised while building when merge keys copy more nodes than allowed."""
+
+
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+_VALUE_TAG = "tag:yaml.org,2002:value"
+
+
+class _LimitedLoader(yaml.SafeLoader):
+    """``yaml.SafeLoader`` that bounds nesting and merge-key copies as it loads.
 
     The composer takes every event through ``get_event``, so counting
     collection starts and ends there bounds its recursion in the same pass that
     builds the document, without reading the text twice.
+
+    ``flatten_mapping`` is the one place PyYAML copies nodes: a merge key puts
+    the pairs of each mapping it names into the mapping that holds it. The
+    version here builds the same pair list, charges two nodes per copied pair
+    to ``node_budget`` before copying, and counts how deep merges chain.
+    Sequences, sets, ``!!omap`` and ``!!pairs`` are built in one pass over
+    their own node and copy nothing.
     """
 
-    def __init__(self, stream: str | bytes) -> None:
+    def __init__(self, stream: str | bytes, *, node_budget: int) -> None:
         super().__init__(stream)
         self._open_collections = 0
+        self._node_budget = node_budget
+        self._merge_depth = 0
+        #: Nodes copied by merge keys so far.
+        self.merged_nodes = 0
 
     def get_event(self) -> yaml.Event:
         event = super().get_event()
@@ -207,20 +239,73 @@ class _NestingLimitedLoader(yaml.SafeLoader):
             self._open_collections -= 1
         return event
 
+    def _merged_pairs(self, owner: yaml.MappingNode, source: yaml.Node) -> list:
+        """The pairs ``source`` contributes to a merge, charged to the budget."""
+        if not isinstance(source, yaml.MappingNode):
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                owner.start_mark,
+                f"expected a mapping for merging, but found {source.id}",
+                source.start_mark,
+            )
+        self.flatten_mapping(source)
+        self.merged_nodes += 2 * len(source.value)
+        if self.merged_nodes > self._node_budget:
+            raise _MergeBudgetError
+        return source.value
 
-def _parse(source: str | bytes, what: str) -> object:
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        """As ``SafeConstructor.flatten_mapping``, with the copies counted."""
+        self._merge_depth += 1
+        if self._merge_depth > MAX_YAML_NESTING:
+            raise _MergeChainError
+        merged: list = []
+        kept: list = []
+        for key_node, value_node in node.value:
+            if key_node.tag == _MERGE_TAG:
+                if isinstance(value_node, yaml.MappingNode):
+                    merged.extend(self._merged_pairs(node, value_node))
+                elif isinstance(value_node, yaml.SequenceNode):
+                    parts = [self._merged_pairs(node, source) for source in value_node.value]
+                    # A later mapping in the list yields to an earlier one.
+                    for pairs in reversed(parts):
+                        merged.extend(pairs)
+                else:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        "expected a mapping or list of mappings for merging, "
+                        f"but found {value_node.id}",
+                        value_node.start_mark,
+                    )
+                continue
+            if key_node.tag == _VALUE_TAG:
+                key_node.tag = "tag:yaml.org,2002:str"
+            kept.append((key_node, value_node))
+        node.value = merged + kept
+        self._merge_depth -= 1
+
+
+def _parse(source: str | bytes, what: str, *, source_bytes: int) -> object:
     """Build the single document in ``source`` as ``yaml.safe_load`` would."""
+    limit = source_bytes + ALIAS_EXPANSION_SLACK
+    # A SafeLoader subclass: the same tags and constructors as safe_load.
+    loader = _LimitedLoader(source, node_budget=limit)
     try:
-        # A SafeLoader subclass: the same tags and constructors as safe_load.
-        return yaml.load(source, Loader=_NestingLimitedLoader)
+        return loader.get_single_data()
     except _TooDeepError:
         raise _nesting_error(what) from None
+    except _MergeChainError:
+        raise YamlLimitError(
+            f"{what} chains merge keys more than {MAX_YAML_NESTING} levels deep; refusing"
+        ) from None
+    except _MergeBudgetError:
+        raise _expansion_error(what, limit, source_bytes) from None
     except RecursionError:
         # Reached only when the caller's own stack is already deep.
-        raise YamlLimitError(
-            f"{what} is nested too deeply to load "
-            f"(limit: {MAX_YAML_NESTING} levels); refusing"
-        ) from None
+        raise YamlLimitError(f"{what} is nested or chained too deeply to load; refusing") from None
+    finally:
+        loader.dispose()
 
 
 def _size_error(what: str, max_bytes: int) -> YamlLimitError:
@@ -244,7 +329,7 @@ def load_yaml_limited(source: str | bytes, what: str, *, max_bytes: int) -> obje
         raise TypeError(f"{what} must be str or bytes, got {type(source).__name__}")
     if source_bytes > max_bytes:
         raise _size_error(what, max_bytes)
-    data = _parse(source, what)
+    data = _parse(source, what, source_bytes=source_bytes)
     check_yaml_expanded_size(data, what, source_bytes=source_bytes)
     return data
 
@@ -265,6 +350,6 @@ def load_yaml_file_limited(
         raw = handle.read(max_bytes + 1)
     if len(raw) > max_bytes:
         raise _size_error(what, max_bytes)
-    data = _parse(raw.decode("utf-8"), what)
+    data = _parse(raw.decode("utf-8"), what, source_bytes=len(raw))
     check_yaml_expanded_size(data, what, source_bytes=len(raw))
     return data

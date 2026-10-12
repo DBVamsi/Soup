@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+
 import pytest
 import yaml
 
@@ -189,8 +193,8 @@ def test_sibling_collections_do_not_add_up_to_a_depth():
 
 
 @pytest.mark.parametrize("spelling", [_flow_sequences, _block_sequences, _flow_mappings])
-def test_nesting_refusal_does_not_depend_on_the_interpreter_stack(spelling):
-    """Far past where the composer's own recursion would give out."""
+def test_document_nested_far_past_the_limit_gets_the_same_refusal(spelling):
+    """Two hundred times the limit is refused exactly as one level past it."""
     text = spelling(20_000)
     with pytest.raises(YamlLimitError, match="doc nests collections more than 100 levels"):
         load_yaml_limited(text, "doc", max_bytes=1_000_000)
@@ -219,12 +223,12 @@ def test_nesting_reached_through_aliases_past_the_limit_is_refused():
         load_yaml_limited(text, "doc", max_bytes=10**6)
 
 
-def test_stack_exhaustion_while_parsing_is_a_refusal_not_a_recursion_error(monkeypatch):
-    """With the event limit out of the way the composer's own recursion gives out."""
+def test_document_past_the_interpreter_limit_is_a_refusal_too(monkeypatch):
+    """With the nesting limit lifted, the interpreter's own limit still ends as a refusal."""
     monkeypatch.setattr(yaml_limits, "MAX_YAML_NESTING", 10**9)
     with pytest.raises(
         YamlLimitError,
-        match=r"^doc is nested too deeply to load \(limit: 1000000000 levels\); refusing$",
+        match=r"^doc is nested or chained too deeply to load; refusing$",
     ):
         load_yaml_limited(_flow_sequences(5000), "doc", max_bytes=10**6)
 
@@ -289,6 +293,166 @@ def test_alias_fan_out_past_the_node_allowance_is_refused():
 def test_self_referencing_alias_is_refused():
     with pytest.raises(YamlLimitError, match="doc expands to more than"):
         load_yaml_limited("a: &x [1, *x]\n", "doc", max_bytes=64)
+
+
+# ---------------------------------------------------------------------------
+# Merge keys: the pairs they copy are charged to the node allowance as made
+# ---------------------------------------------------------------------------
+
+
+def _merge_fan(copies: int, keys: int = 10) -> str:
+    """One mapping of ``keys`` pairs merged ``copies`` times into another."""
+    base = ", ".join(f"k{index}: {index}" for index in range(keys))
+    return f"b: &b {{{base}}}\nm:\n  <<: [" + ", ".join(["*b"] * copies) + "]\n"
+
+
+def _merge_ladder(steps: int) -> str:
+    """Each mapping merges the one before it and adds a key of its own."""
+    text = "m0: &m0 {k0: 0}\n"
+    for index in range(1, steps + 1):
+        text += f"m{index}: &m{index} {{<<: *m{index - 1}, k{index}: {index}}}\n"
+    return text
+
+
+def _merge_chain(links: int) -> str:
+    """The root merges the last of ``links`` mappings that each merge the one before."""
+    text = "c0: &c0 {k: v}\n"
+    for index in range(1, links):
+        text += f"c{index}: &c{index} {{<<: *c{index - 1}}}\n"
+    return text + f"<<: *c{links - 1}\n"
+
+
+def _allowance(text: str) -> int:
+    return len(text.encode()) + yaml_limits.ALIAS_EXPANSION_SLACK
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a: &a {x: 1, y: 2}\nb:\n  <<: *a\n  y: 3\n",
+        "a: &a {x: 1}\nb: &b {x: 2, y: 2}\nc:\n  <<: [*a, *b]\n  z: 3\n",
+        "a: &a {x: 1}\nb: &b {<<: *a, y: 2}\nc: {<<: *b, z: 3}\n",
+        "c:\n  <<: {x: 1}\n  <<: {x: 2, y: 2}\n",
+        "c: {<<: {<<: {<<: {x: 1}, y: 2}, z: 3}}\n",
+        "a: &a {}\nb: {<<: *a}\nc: {<<: []}\n",
+        "c: {=: plain}\n",
+        "? ab\n: 1\n",
+    ],
+)
+def test_merge_keys_load_as_safe_load_loads_them(text):
+    assert load_yaml_limited(text, "doc", max_bytes=4096) == yaml.safe_load(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a: {<<: 1}\n", "a: &a {x: 1}\nb: {<<: [*a, 2, 3]}\n", "b: {<<: [[1]]}\n"],
+)
+def test_a_merge_of_something_else_is_the_same_yaml_error(text):
+    with pytest.raises(yaml.YAMLError) as expected:
+        yaml.safe_load(text)
+    with pytest.raises(yaml.YAMLError) as raised:
+        load_yaml_limited(text, "doc", max_bytes=4096)
+    assert type(raised.value) is type(expected.value)
+    assert str(raised.value) == str(expected.value)
+
+
+def _copies_at_the_allowance(keys: int) -> int:
+    """The most copies whose merged pairs (two nodes each) fit the allowance."""
+    copies = 1
+    while 2 * (copies + 1) * keys <= _allowance(_merge_fan(copies + 1, keys)):
+        copies += 1
+    return copies
+
+
+def test_merged_pairs_exactly_at_the_node_allowance_load():
+    copies = _copies_at_the_allowance(10)
+    text = _merge_fan(copies)
+    assert _allowance(text) - 2 * copies * 10 < 20  # within one merged mapping of it
+    assert load_yaml_limited(text, "doc", max_bytes=10**6) == yaml.safe_load(text)
+
+
+def test_merged_pairs_one_mapping_past_the_node_allowance_are_refused():
+    text = _merge_fan(_copies_at_the_allowance(10) + 1)
+    with pytest.raises(YamlLimitError) as raised:
+        load_yaml_limited(text, "doc", max_bytes=10**6)
+    assert str(raised.value) == (
+        f"doc expands to more than {_allowance(text)} nodes from "
+        f"{len(text.encode())} bytes of YAML; refusing"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [_merge_fan(5000, keys=50), _merge_ladder(1500)],
+    ids=["fan", "ladder"],
+)
+def test_merging_stops_at_the_first_pair_past_the_allowance(text):
+    """Counted on the loader itself: nothing is copied beyond one more mapping."""
+    budget = _allowance(text)
+    loader = yaml_limits._LimitedLoader(text, node_budget=budget)
+    try:
+        with pytest.raises(yaml_limits._MergeBudgetError):
+            loader.get_single_data()
+        assert budget < loader.merged_nodes <= budget + 2 * 1500
+    finally:
+        loader.dispose()
+
+
+def test_merge_ladder_past_the_allowance_is_refused_by_name():
+    with pytest.raises(YamlLimitError, match="^doc expands to more than"):
+        load_yaml_limited(_merge_ladder(1500), "doc", max_bytes=10**6)
+
+
+def test_merge_chain_at_the_limit_loads():
+    text = _merge_chain(MAX_YAML_NESTING - 1)
+    assert load_yaml_limited(text, "doc", max_bytes=10**6) == yaml.safe_load(text)
+
+
+@pytest.mark.parametrize("links", [MAX_YAML_NESTING, 20_000])
+def test_merge_chain_past_the_limit_is_refused(links):
+    with pytest.raises(
+        YamlLimitError,
+        match=r"^doc chains merge keys more than 100 levels deep; refusing$",
+    ):
+        load_yaml_limited(_merge_chain(links), "doc", max_bytes=10**6)
+
+
+def test_a_mapping_that_merges_itself_is_refused():
+    with pytest.raises(YamlLimitError, match="doc chains merge keys more than 100 levels"):
+        load_yaml_limited("a: &a {<<: *a}\n", "doc", max_bytes=64)
+
+
+_MEASURE = """
+import json, sys, time, tracemalloc
+from soup_cli.utils.yaml_limits import YamlLimitError, load_yaml_limited
+base = ", ".join(f"k{i}: {i}" for i in range(2000))
+text = "b: &b {" + base + "}\\nm:\\n  <<: [" + ", ".join(["*b"] * 4000) + "]\\n"
+tracemalloc.start()
+started = time.perf_counter()
+try:
+    load_yaml_limited(text, "doc", max_bytes=10**6)
+    outcome = "loaded"
+except YamlLimitError as exc:
+    outcome = str(exc)
+print(json.dumps({"bytes": len(text), "outcome": outcome,
+                  "seconds": time.perf_counter() - started,
+                  "peak": tracemalloc.get_traced_memory()[1]}))
+"""
+
+
+def test_refusal_of_a_large_merge_stays_small_in_memory():
+    """Eight million pairs asked for by 40 KB of text; the refusal keeps to a few MB."""
+    done = subprocess.run(
+        [sys.executable, "-W", "ignore", "-c", _MEASURE],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=True,
+    )
+    report = json.loads(done.stdout.strip().splitlines()[-1])
+    assert report["bytes"] < 64 * 1024
+    assert report["outcome"].startswith("doc expands to more than"), report
+    assert report["peak"] < 32 * 1024 * 1024, report
 
 
 # ---------------------------------------------------------------------------
