@@ -21,7 +21,6 @@ import pytest
 from soup_cli.utils.audit_log import AuditEvent, append_audit_event
 from soup_cli.utils.draft import _registry_lock, list_drafts
 from soup_cli.utils.paths import open_no_follow
-from tests._source_scan import parse_source, walk_nodes
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "soup_cli"
 
@@ -273,10 +272,10 @@ def _scan_bare_nofollow(root: Path) -> List[Tuple[str, int]]:
     offenders: List[Tuple[str, int]] = []
     for py_file in sorted(root.rglob("*.py")):
         try:
-            tree = parse_source(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
         except SyntaxError:
             continue
-        for node in walk_nodes(tree):
+        for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)

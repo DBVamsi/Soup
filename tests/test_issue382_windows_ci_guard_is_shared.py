@@ -25,7 +25,6 @@ from pathlib import Path
 
 import pytest
 
-from tests._source_scan import parse_source, walk_nodes
 from tests._windows_ci import _windows_ci, skip_on_windows_ci
 
 _TESTS_DIR = Path(__file__).resolve().parent
@@ -43,10 +42,10 @@ class TestThereIsExactlyOneDefinition:
         definers = []
         for path in sorted(_TESTS_DIR.rglob("*.py")):
             try:
-                tree = parse_source(path.read_text(encoding="utf-8"))
+                tree = ast.parse(path.read_text(encoding="utf-8"))
             except SyntaxError:
                 continue
-            for node in walk_nodes(tree):
+            for node in ast.walk(tree):
                 if isinstance(node, ast.FunctionDef) and node.name == "_windows_ci":
                     definers.append(path.name)
         assert definers == [_HOME.name], (
@@ -57,10 +56,10 @@ class TestThereIsExactlyOneDefinition:
         builders = []
         for path in sorted(_TESTS_DIR.rglob("*.py")):
             try:
-                tree = parse_source(path.read_text(encoding="utf-8"))
+                tree = ast.parse(path.read_text(encoding="utf-8"))
             except SyntaxError:
                 continue
-            for node in walk_nodes(tree):
+            for node in ast.walk(tree):
                 if isinstance(node, ast.Assign) and any(
                     isinstance(t, ast.Name) and t.id == "skip_on_windows_ci"
                     for t in node.targets

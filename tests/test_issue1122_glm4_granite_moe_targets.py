@@ -44,7 +44,6 @@ from soup_cli.utils.peft_wiring import (
     PARTIAL_COVERAGE_NOTES,
     resolve_lora_target_modules,
 )
-from tests._source_scan import parse_source, walk_nodes
 
 pytest.importorskip("torch")
 pytest.importorskip("transformers")
@@ -359,8 +358,8 @@ class TestEveryCallSiteSuppliesTheConsole:
         for path in sorted(source_root.rglob("*.py")):
             if path.name == "peft_wiring.py":
                 continue  # the definition, not a call site
-            tree = parse_source(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in walk_nodes(tree):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
                 if (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Name)

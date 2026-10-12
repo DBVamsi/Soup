@@ -161,7 +161,7 @@ def consumed_names(paths) -> set:
     names: set = set()
     for path in paths:
         try:
-            tree = parse_source(path.read_text(errors="ignore"))
+            tree = parse_source(path.read_text(errors="ignore"), keep=True)
         except (SyntaxError, UnicodeDecodeError, ValueError):
             continue
         for node in walk_nodes(tree):
@@ -204,7 +204,7 @@ def training_receiver_reads(paths, field: str) -> bool:
     """
     for path in paths:
         try:
-            tree = parse_source(pathlib.Path(path).read_text(errors="ignore"))
+            tree = parse_source(pathlib.Path(path).read_text(errors="ignore"), keep=True)
         except (SyntaxError, UnicodeDecodeError, ValueError):
             continue
         for node in walk_nodes(tree):
@@ -251,7 +251,7 @@ def schema_property_reads(schema_path: pathlib.Path) -> dict:
     """
     out: dict = {}
     try:
-        tree = parse_source(schema_path.read_text(errors="ignore"))
+        tree = parse_source(schema_path.read_text(errors="ignore"), keep=True)
     except (SyntaxError, UnicodeDecodeError, ValueError):  # pragma: no cover
         return out
     for node in walk_nodes(tree):
@@ -931,7 +931,7 @@ def function_scoped_reads(paths) -> dict:
     out: dict = {}
     for path in paths:
         try:
-            tree = parse_source(path.read_text(errors="ignore"))
+            tree = parse_source(path.read_text(errors="ignore"), keep=True)
         except (SyntaxError, UnicodeDecodeError, ValueError):
             continue
         stack = [(tree, None)]
@@ -964,7 +964,7 @@ def referenced_names(paths) -> set:
     names: set = set()
     for path in paths:
         try:
-            tree = parse_source(path.read_text(errors="ignore"))
+            tree = parse_source(path.read_text(errors="ignore"), keep=True)
         except (SyntaxError, UnicodeDecodeError, ValueError):
             continue
         for node in walk_nodes(tree):

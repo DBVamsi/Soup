@@ -98,7 +98,7 @@ def find_optioninfo_leaks(root: pathlib.Path) -> list[tuple[str, int, str, list[
 
     for path in sorted(root.rglob("*.py")):
         try:
-            tree = parse_source(path.read_text(encoding="utf-8"))
+            tree = parse_source(path.read_text(encoding="utf-8"), keep=True)
         except SyntaxError:  # pragma: no cover - the tree parses today
             continue
         trees[path] = tree

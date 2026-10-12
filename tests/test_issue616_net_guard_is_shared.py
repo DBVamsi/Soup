@@ -42,7 +42,7 @@ _CONSUMERS = ("hf.py", "hubs.py", "loop_stages.py", "qr_url.py", "webhooks.py", 
 
 
 def _parse(path: Path) -> ast.Module:
-    return parse_source(path.read_text(encoding="utf-8"))
+    return parse_source(path.read_text(encoding="utf-8"), keep=True)
 
 
 def _assigned_names(node: ast.AST) -> list[str]:
