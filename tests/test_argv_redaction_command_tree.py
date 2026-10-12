@@ -206,7 +206,8 @@ def test_an_empty_option_set_masks_by_the_names_on_the_command_line(cli, monkeyp
         (["--client-secret", "V"], ("--client-secret", REDACTED)),
         (["--credential-file", "V"], ("--credential-file", REDACTED)),
         (["--API-KEY", "V"], ("--API-KEY", REDACTED)),
-        (["--api-key", "--looks-like-an-option"], ("--api-key", REDACTED)),
+        (["--api-key", "-S1"], ("--api-key", REDACTED)),
+        (["--api-key", "-"], ("--api-key", REDACTED)),
         (
             ["--api-key", "V1", "--auth-token", "V2"],
             ("--api-key", REDACTED, "--auth-token", REDACTED),
@@ -340,3 +341,53 @@ def test_no_real_switch_has_a_name_the_rule_would_mask(cli):
             if getattr(param, "is_flag", False) or getattr(param, "count", False):
                 unlisted.update(name for name in _long_names(param) if is_secret_name(name))
     assert unlisted == set(), "list each in NOT_SECRET_OPTIONS"
+
+
+# ---------------------------------------------------------------------------
+# A long option is never taken as the value of the option before it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--keep-key-cache", "--api-key", "S1"], ("--keep-key-cache", "--api-key", REDACTED)),
+        (["--api-key", "--auth-token", "S1"], ("--api-key", "--auth-token", REDACTED)),
+        (["--api-key", "--auth-token=S1"], ("--api-key", f"--auth-token={REDACTED}")),
+        (["--api-key", "--model", "m"], ("--api-key", "--model", "m")),
+        (["--use-token", "--", "S1"], ("--use-token", "--", "S1")),
+        (["--api-key", "--api-key", "--api-key", "S1"], ("--api-key",) * 3 + (REDACTED,)),
+    ],
+)
+def test_a_long_option_after_a_credential_option_is_scanned_not_masked(args, expected):
+    assert mask_secret_args(args, frozenset()) == expected
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--token", "--repo", "u/m"], ("--token", "--repo", "u/m")),
+        (["-t", "--token", "S1"], ("-t", "--token", REDACTED)),
+        (["-xt", "--repo", "u/m"], ("-xt", "--repo", "u/m")),
+        (["-t", "-S1"], ("-t", REDACTED)),
+    ],
+)
+def test_the_same_holds_for_options_the_tree_declares(args, expected):
+    assert mask_secret_args(args, frozenset({"--token", "-t"})) == expected
+
+
+# ---------------------------------------------------------------------------
+# A group of a foreign tree is masked with the short aliases of its commands
+# ---------------------------------------------------------------------------
+
+
+def test_a_foreign_group_masks_the_short_alias_of_its_command(cli, monkeypatch):
+    push = _Command("push", [_Option("--token", "-t"), _Option("--repo")])
+    root = _Group("soup", [_Group("hub", [push])])
+    monkeypatch.setattr(typer.main, "get_command", lambda app: root)
+    assert cli._mask_audit_args("hub", ["-t", "VALUE", "--repo", "u/m"]) == (
+        "-t",
+        REDACTED,
+        "--repo",
+        "u/m",
+    )

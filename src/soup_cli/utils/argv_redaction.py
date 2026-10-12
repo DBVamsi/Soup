@@ -170,7 +170,8 @@ def mask_secret_args(args: Sequence[str], secret_opts: frozenset[str]) -> tuple[
     Handles ``--opt value``, ``--opt=value``, ``-o value``, ``-oVALUE`` and
     bundled short options (``-xoVALUE`` / ``-xo VALUE``, where ``-x`` is a flag
     and ``-o`` takes the value). An option with no following value is kept as
-    is.
+    is, and a token that starts with ``--`` is never taken as a value, so a
+    switch in front of a credential option cannot shift the mask off its value.
     """
     long_opts = {o for o in secret_opts if o.startswith("--")}
     short_opts = {o for o in secret_opts if not o.startswith("--") and len(o) == 2}
@@ -179,9 +180,12 @@ def mask_secret_args(args: Sequence[str], secret_opts: frozenset[str]) -> tuple[
     for raw in args:
         tok = str(raw)
         if mask_next:
-            out.append(REDACTED)
             mask_next = False
-            continue
+            if not tok.startswith("--"):
+                out.append(REDACTED)
+                continue
+            # A long option is never a value: the option before it had none,
+            # and this one is scanned like any other.
         if tok in secret_opts:
             out.append(tok)
             mask_next = True
