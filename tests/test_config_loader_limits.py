@@ -257,8 +257,12 @@ class TestConfigFile:
         with pytest.raises(SystemExit):
             load_config("run\x1b[31m\x07[bold]x.yaml")
         printed = capsys.readouterr().out
-        assert "\x1b" not in printed and "\x07" not in printed
-        assert "Config file run[31m[bold]x.yaml is larger than" in _plain(printed)
+        # Rich may add colour codes of its own, so compare the text without them: the
+        # escape typed in the path is gone, what followed it is text, the tag is literal.
+        assert "\x07" not in printed
+        assert _plain(printed) == (
+            f"Config file run[31m[bold]x.yaml is larger than {MAX_CONFIG_BYTES} bytes; refusing"
+        )
 
     def test_missing_config_is_still_file_not_found(self, in_tmp):
         with pytest.raises(FileNotFoundError):
