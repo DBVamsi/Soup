@@ -1141,7 +1141,7 @@ def train(
             # Validate the suite path up-front (path containment + parse).
             load_suite(gate)
         except (FileNotFoundError, ValueError) as exc:
-            console.print(f"[red]Invalid --gate suite: {exc}[/]")
+            console.print(f"[red]Invalid --gate suite: {for_terminal(str(exc))}[/]")
             raise typer.Exit(1) from exc
         cfg.training.eval_gate = EvalGateConfig(enabled=True, suite=gate)
         console.print(f"[green]Eval gate enabled[/] with suite: {gate}")
