@@ -1,54 +1,28 @@
-# The upstream stack that pull-request CI installs.
+# The upstream stack that pull-request CI installs: exact pins, nothing else.
 #
-# WHAT IT IS FOR. On a pull-request run and on a push to `main`, every job of
-# ci.yml that installs the project adds `-c .github/constraints/pinned-upstream.txt`
-# to its `pip install` (the `plan` job decides: its QUICK and APPROVAL runs). A
-# new release of one of the packages below therefore cannot fail every open pull
-# request at once, for a reason none of them can fix from its branch.
+# WHAT. On a pull request and on a push to `main`, every workflow job that
+# installs torch or transformers passes this file to pip with `-c`, so a new
+# release of a package below cannot fail every open pull request at once. A
+# constraint installs nothing: a job takes only the lines for what it installs
+# (mlx-smoke, which has no torch: transformers, tokenizers, huggingface-hub and
+# safetensors). `transformers-floor` uses its own file, transformers-floor.txt.
 #
-# WHERE A NEW RELEASE STILL SHOWS. The nightly full run on `main`, a manual
+# WHERE A NEW RELEASE STILL SHOWS. The nightly full run of ci.yml, a manual
 # dispatch, a push to `release/**` and the weekly `dependency drift` job install
-# with no constraints and resolve the newest release of everything. A break
-# upstream turns the nightly run red: on `main`, once, within a day.
-# `transformers-floor` is separate and installs the exact floor in
-# transformers-floor.txt on every run it is part of. Everything `.[dev]` pulls in
-# that is not listed here (numpy, pydantic, mcp, bitsandbytes, pytest, ...) still
-# resolves the newest on every run.
+# without this file. Packages that are not listed here float on every run.
 #
-# WHEN TO BUMP IT.
-#   * The nightly full run is green on versions newer than these. The suite is
-#     known to pass on them, and a pull request should be tested on what a user
-#     installs today.
-#   * The nightly full run is red on a new release. The pull request that fixes
-#     `main` for it bumps the pin in the same change, so that its own cells run
-#     the fix on the new version.
-#   * A bound in pyproject.toml moves past a pin. pip can no longer resolve the
-#     cell, and tests/test_ci_pinned_upstream.py fails and names the pin.
+# WHEN TO BUMP. The nightly run is green on newer versions; or it is red on a
+# new release, and the pull request that fixes `main` bumps the pin so that its
+# own cells run the fix; or a bound in pyproject.toml moves past a pin.
 #
-# HOW.
+# HOW. Run this on Windows or macOS (on Linux it downloads the CUDA wheels):
 #   python -m pip install --dry-run --ignore-installed -e ".[dev]"
-# prints `Would install ...`: the newest version of every package that
-# pyproject.toml admits. It downloads the wheels it resolves, so run it on
-# Windows or macOS, where torch is one wheel of about 125 MB and brings no CUDA
-# libraries. Copy the versions of the packages listed below, update the last
-# paragraph of this header, run
-#   pytest --no-cov -q tests/test_ci_pinned_upstream.py
-# and open a pull request. Its own run installs under the new pins; with the
-# `ci:full` label it does so on every required OS and Python and in the smoke
-# jobs, before anything merges.
+# Copy the versions it prints after `Would install` for the packages below, run
+# `pytest --no-cov -q tests/test_ci_pinned_upstream.py`, and open a pull request
+# with the `ci:full` label: its own cells then install under the new pins.
 #
-# FORMAT. One line per package, `name==version` and nothing else. The test
-# refuses a range, a wildcard, a marker, a pip option, a trailing comment and a
-# second line for one package. No line needs a marker today: every version
-# below has a wheel for ubuntu x86_64, Windows amd64 and macOS arm64 on Python
-# 3.10 to 3.12 (torch, tokenizers and safetensors checked against the PyPI file
-# list; the other six are pure Python).
-#
-# THESE VERSIONS are what `test (ubuntu-latest, 3.12)` installed in the newest
-# green push to `main` when the file was written (run 37983269245, 2026-10-09,
-# commit 61e8c2bf). The green nightly run of 2026-10-12 (38239783640, same
-# commit) resolved the same nine on ubuntu 3.10, Windows 3.12 and macOS 3.12 and
-# in pytorch-smoke, torchao-contract and mlx-smoke.
+# FORMAT. One `name==version` per line and each package once: no range, marker,
+# pip option or trailing comment. The test refuses them.
 torch==2.14.1
 transformers==5.19.0
 tokenizers==0.23.3
