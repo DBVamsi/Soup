@@ -412,6 +412,12 @@ use the newest released version in `CHANGELOG.md`, prefer the PR number rather t
 issue it closes, and choose `added`, `changed`, `deprecated`, `removed`, `fixed`, or
 `security`.
 
+If you add or remove a CLI option, an argument or a `soup.yaml` field, or change its
+type, default or bounds, run `python scripts/gen_reference_docs.py` and commit the pages
+it rewrites (`docs/cli-reference.md`, `docs/config-reference.md`); the tests fail until
+you do and name what differs. Rewording a help string or a description needs nothing:
+maintainers regenerate the wording at release.
+
 ### 3. Run Tests & Lint
 
 Before pushing, ensure everything passes:
