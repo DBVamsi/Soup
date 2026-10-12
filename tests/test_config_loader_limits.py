@@ -223,10 +223,42 @@ class TestConfigFile:
         )
         assert _refused(capsys) == _plain(f"Config validation error: {expected}")
 
-    def test_syntax_error_is_still_a_yaml_error(self, in_tmp):
+    def test_syntax_error_is_one_line_that_names_the_file_and_the_place(self, in_tmp, capsys):
         (in_tmp / "soup.yaml").write_text("base: [unclosed\ntask: }\n", encoding="utf-8")
-        with pytest.raises(yaml.YAMLError):
-            load_config("soup.yaml")
+        output = _refused(capsys)
+        assert output == (
+            "Config file soup.yaml is not valid YAML: "
+            "expected ',' or ']', but got ':' (line 2, column 5)"
+        )
+
+    def test_bytes_that_are_not_utf8_are_one_line_that_names_the_file(self, in_tmp, capsys):
+        (in_tmp / "soup.yaml").write_bytes(b"base: caf\xe9\n")
+        assert _refused(capsys) == (
+            "Config file soup.yaml is not valid UTF-8: invalid continuation byte at byte 9"
+        )
+
+    def test_a_directory_is_one_line_that_names_it(self, in_tmp, capsys):
+        (in_tmp / "soup.yaml").mkdir()
+        assert _refused(capsys) == "Config file soup.yaml is a directory, not a file"
+
+    def test_a_number_too_long_to_build_is_one_line_that_names_the_file(self, in_tmp, capsys):
+        (in_tmp / "soup.yaml").write_text(_VALID + "extra: " + "7" * 5000 + "\n", encoding="utf-8")
+        output = _refused(capsys)
+        assert output.startswith("Config file soup.yaml holds a value that cannot be loaded: ")
+        assert "4300" in output
+
+    def test_a_path_with_control_characters_and_markup_is_printed_escaped(
+        self, capsys, monkeypatch
+    ):
+        def _over(path, what, *, max_bytes):
+            raise YamlLimitError(f"{what} is larger than {max_bytes} bytes; refusing")
+
+        monkeypatch.setattr(loader, "load_yaml_file_limited", _over)
+        with pytest.raises(SystemExit):
+            load_config("run\x1b[31m\x07[bold]x.yaml")
+        printed = capsys.readouterr().out
+        assert "\x1b" not in printed and "\x07" not in printed
+        assert "Config file run[31m[bold]x.yaml is larger than" in _plain(printed)
 
     def test_missing_config_is_still_file_not_found(self, in_tmp):
         with pytest.raises(FileNotFoundError):
@@ -296,6 +328,56 @@ class TestConfigText:
     def test_syntax_error_is_still_a_yaml_error(self):
         with pytest.raises(yaml.YAMLError):
             load_config_from_string("base: [unclosed\ntask: }\n")
+
+
+class TestCallerWithItsOwnSizeLimit:
+    def test_text_api_takes_the_callers_limit(self):
+        text = _config_of_size(4096)
+        assert load_config_from_string(text, max_bytes=4096).task == "sft"
+        with pytest.raises(YamlLimitError, match=r"^Config is larger than 4095 bytes; refusing$"):
+            load_config_from_string(text, max_bytes=4095)
+
+    def test_ship_accepts_two_mebibytes_and_train_refuses_them(self, in_tmp):
+        from soup_cli.cli import app
+        from soup_cli.commands import ship
+
+        assert ship._MAX_CONFIG_BYTES == 4 * 1024 * 1024
+        (in_tmp / "soup.yaml").write_bytes(_config_of_size(2 * 1024 * 1024).encode())
+        config, _ = ship._parse_ship_config("soup.yaml")
+        assert config.base == "meta-llama/Llama-3.1-8B-Instruct"
+        result = CliRunner().invoke(app, ["train", "--config", "soup.yaml", "--dry-run"])
+        assert result.exit_code == 1, (result.output, repr(result.exception))
+        assert f"Config file soup.yaml {_SIZE_MESSAGE}" in _plain(result.output)
+
+    def test_ship_refuses_a_config_over_its_own_limit(self, in_tmp):
+        import click
+
+        from soup_cli.commands import ship
+
+        (in_tmp / "soup.yaml").write_bytes(b"#" + b"x" * ship._MAX_CONFIG_BYTES)
+        with pytest.raises(click.exceptions.Exit):
+            ship._parse_ship_config("soup.yaml")
+
+    def test_recipes_verify_reads_no_further_than_the_limit(self, in_tmp, capsys):
+        import click
+
+        from soup_cli.commands.recipes import _configs_to_verify
+
+        (in_tmp / "soup.yaml").write_bytes(_config_of_size(MAX_CONFIG_BYTES + 1).encode())
+        with pytest.raises(click.exceptions.Exit):
+            _configs_to_verify("soup.yaml", False)
+        captured = capsys.readouterr()
+        assert f"Config file soup.yaml {_SIZE_MESSAGE}" in _plain(captured.out + captured.err)
+
+    def test_adapters_audit_reads_no_further_than_the_limit(self, in_tmp):
+        from soup_cli.cli import app
+
+        (in_tmp / "adapter").mkdir()
+        (in_tmp / "adapter" / "adapter_config.json").write_text("{}", encoding="utf-8")
+        (in_tmp / "soup.yaml").write_bytes(_config_of_size(MAX_CONFIG_BYTES + 1).encode())
+        result = CliRunner().invoke(app, ["adapters", "audit", "adapter", "--config", "soup.yaml"])
+        assert result.exit_code == 1, (result.output, repr(result.exception))
+        assert f"Config file soup.yaml {_SIZE_MESSAGE}" in _plain(result.output)
 
 
 # ---------------------------------------------------------------------------

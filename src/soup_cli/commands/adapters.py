@@ -1800,6 +1800,7 @@ def audit(
     # The schema is the single source of defaults; the audit module stays pure.
     try:
         from soup_cli.config.loader import load_config_from_string
+        from soup_cli.utils.yaml_limits import MAX_CONFIG_BYTES, read_text_limited
 
         # The loader reports unknown keys through its own module-level Console,
         # which writes to STDOUT -- so `--json` emitted four lines of warning
@@ -1807,7 +1808,11 @@ def audit(
         # A diagnostic about the config is not this command's output; stderr
         # is where it belongs, and it stays just as visible there.
         with contextlib.redirect_stdout(sys.stderr):
-            soup_config = load_config_from_string(config_path.read_text())
+            soup_config = load_config_from_string(
+                read_text_limited(
+                    config_path, f"Config file {config}", max_bytes=MAX_CONFIG_BYTES
+                )
+            )
     except yaml.YAMLError as exc:
         console.print(f"[red]Could not parse {config}: {exc}[/]")
         raise typer.Exit(1) from exc
@@ -1941,4 +1946,3 @@ def check_cmd(
         raise typer.Exit(0)
     else:
         raise typer.Exit(2)
-

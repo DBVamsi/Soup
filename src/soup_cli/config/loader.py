@@ -3,6 +3,7 @@
 import warnings
 from pathlib import Path
 
+import yaml
 from pydantic import ValidationError
 from rich.console import Console
 
@@ -97,6 +98,42 @@ def _report_staged_fields(
     return None
 
 
+def _refuse(message: str) -> None:
+    """Print a one-line refusal and exit 1; the text may quote the file."""
+    console.print(f"[red]{for_terminal(message)}[/]")
+    raise SystemExit(1)
+
+
+def _read_config_file(path: Path) -> object:
+    """Load the YAML document at ``path``, or exit 1 naming what stopped it.
+
+    A file over a limit, a directory, bytes that are not UTF-8, a YAML
+    syntax error and a value YAML cannot build (a number of thousands of
+    digits) each get one line that names the file and the problem. A
+    missing file is left to the caller as ``FileNotFoundError``.
+    """
+    what = f"Config file {path}"
+    if path.is_dir():
+        _refuse(f"{what} is a directory, not a file")
+    try:
+        return load_yaml_file_limited(path, what, max_bytes=MAX_CONFIG_BYTES)
+    except YamlLimitError as exc:
+        _refuse(str(exc))
+    except UnicodeDecodeError as exc:
+        _refuse(f"{what} is not valid UTF-8: {exc.reason} at byte {exc.start}")
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        problem = getattr(exc, "problem", None)
+        if mark is not None and problem:
+            detail = f"{problem} (line {mark.line + 1}, column {mark.column + 1})"
+        else:
+            detail = " ".join(str(exc).split())
+        _refuse(f"{what} is not valid YAML: {detail}")
+    except ValueError as exc:
+        _refuse(f"{what} holds a value that cannot be loaded: {' '.join(str(exc).split())}")
+    return None  # pragma: no cover - _refuse always raises
+
+
 def _build_config(raw: dict) -> SoupConfig:
     """Construct ``SoupConfig``, printing each deprecated value once (#759).
 
@@ -139,17 +176,10 @@ def load_config(
     The file is read under the limits of :mod:`soup_cli.utils.yaml_limits`
     (at most :data:`MAX_CONFIG_BYTES`, bounded nesting and alias expansion);
     a file over one of them exits 1 with a message naming the file and the
-    limit, before anything walks the document.
+    limit, before anything walks the document. So does a file that cannot
+    be read as YAML at all; see :func:`_read_config_file`.
     """
-    path = Path(path)
-    try:
-        raw = load_yaml_file_limited(
-            path, f"Config file {path}", max_bytes=MAX_CONFIG_BYTES
-        )
-    except YamlLimitError as exc:
-        # The message quotes the path it was given.
-        console.print(f"[red]{for_terminal(str(exc))}[/]")
-        raise SystemExit(1) from exc
+    raw = _read_config_file(Path(path))
 
     if raw is None:
         console.print("[red]Config file is empty[/]")
@@ -193,15 +223,18 @@ def load_config(
     return config
 
 
-def load_config_from_string(yaml_str: str) -> SoupConfig:
+def load_config_from_string(yaml_str: str, *, max_bytes: "int | None" = None) -> SoupConfig:
     """Parse a YAML string and return validated SoupConfig.
 
     Unlike load_config(), raises ValueError on errors instead of SystemExit,
     making it suitable for API/UI usage. The text is held to the same limits
     as a config file; crossing one raises
     :class:`~soup_cli.utils.yaml_limits.YamlLimitError`, a ``ValueError``.
+    ``max_bytes`` replaces :data:`MAX_CONFIG_BYTES` for a caller that
+    documents a size limit of its own.
     """
-    raw = load_yaml_limited(yaml_str, "Config", max_bytes=MAX_CONFIG_BYTES)
+    limit = MAX_CONFIG_BYTES if max_bytes is None else max_bytes
+    raw = load_yaml_limited(yaml_str, "Config", max_bytes=limit)
     if raw is None:
         raise ValueError("Config is empty")
     if not isinstance(raw, dict):

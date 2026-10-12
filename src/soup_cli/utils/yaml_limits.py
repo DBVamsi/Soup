@@ -334,22 +334,33 @@ def load_yaml_limited(source: str | bytes, what: str, *, max_bytes: int) -> obje
     return data
 
 
-def load_yaml_file_limited(
+def read_text_limited(
     path: str | os.PathLike[str], what: str, *, max_bytes: int
-) -> object:
-    """Load one YAML document from a UTF-8 file, within the limits.
+) -> str:
+    """Return the text of a UTF-8 file of at most ``max_bytes`` bytes.
 
-    Reads at most ``max_bytes + 1`` bytes, so a larger file is refused without
-    being held in memory, and ``max_bytes`` counts the bytes on disk. The
-    result is what ``yaml.safe_load`` returns for the file's text: YAML treats
-    CRLF, CR and LF line ends alike and skips a leading byte order mark.
-    Raises as :func:`load_yaml_limited` does; ``OSError`` and
-    ``UnicodeDecodeError`` are passed on unchanged.
+    Reads at most ``max_bytes + 1`` bytes and raises :class:`YamlLimitError`
+    naming ``what`` when the file is larger, so the whole of a larger file is
+    never held in memory.
     """
     with open(path, "rb") as handle:
         raw = handle.read(max_bytes + 1)
     if len(raw) > max_bytes:
         raise _size_error(what, max_bytes)
-    data = _parse(raw.decode("utf-8"), what, source_bytes=len(raw))
-    check_yaml_expanded_size(data, what, source_bytes=len(raw))
-    return data
+    return raw.decode("utf-8")
+
+
+def load_yaml_file_limited(
+    path: str | os.PathLike[str], what: str, *, max_bytes: int
+) -> object:
+    """Load one YAML document from a UTF-8 file, within the limits.
+
+    The file is read with :func:`read_text_limited`, so ``max_bytes`` counts
+    the bytes on disk and a larger file is refused without being held in
+    memory. The result is what ``yaml.safe_load`` returns for the file's
+    text: YAML treats CRLF, CR and LF line ends alike and skips a leading
+    byte order mark. Raises as :func:`load_yaml_limited` does; ``OSError``
+    and ``UnicodeDecodeError`` are passed on unchanged.
+    """
+    text = read_text_limited(path, what, max_bytes=max_bytes)
+    return load_yaml_limited(text, what, max_bytes=max_bytes)

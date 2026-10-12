@@ -11,9 +11,11 @@ that the refusal comes out in that reader's own contract.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from soup_cli.utils.yaml_limits import MAX_YAML_NESTING, YamlLimitError
 
@@ -36,6 +38,7 @@ YAML_USERS = {
     "commands/ship.py": ("YAMLError",),
     "commands/spectrum.py": ("safe_dump",),
     "commands/sweep.py": ("YAMLError",),
+    "config/loader.py": ("YAMLError",),
     "migrate/common.py": ("dump",),
     "ui/app.py": ("dump",),
     "utils/adapter_branch.py": ("safe_dump",),
@@ -247,7 +250,7 @@ _OVER_LIMIT = {
 
 
 def _write(name: str, text: str) -> str:
-    Path(name).write_text(text, encoding="utf-8")
+    Path(name).write_bytes(text.encode("utf-8"))  # no newline translation
     return name
 
 
@@ -420,13 +423,236 @@ def test_every_routed_reader_has_a_case():
         if rel == LOADER_MODULE:
             continue
         text = path.read_text(encoding="utf-8")
-        if "load_yaml_limited" in text or "load_yaml_file_limited" in text:
+        if any(name in text for name in _LIMITED_READS):
             importers.add(rel)
     covered_elsewhere = {
         "config/loader.py",  # tests/test_config_loader_limits.py
         "cans/unpack.py",  # tests/test_yaml_expanded_limit.py
+        "commands/adapters.py",  # tests/test_config_loader_limits.py
+        "commands/recipes.py",  # tests/test_config_loader_limits.py
         "commands/deploy.py",
         "commands/push.py",
         "utils/license_matrix.py",
     }
     assert importers == set(_RAISING_READERS) | covered_elsewhere
+
+
+# ---------------------------------------------------------------------------
+# Each reader's own size cap: one byte over it is refused in that reader's words
+# ---------------------------------------------------------------------------
+
+_LIMITED_READS = ("load_yaml_limited", "load_yaml_file_limited", "read_text_limited")
+
+
+def _comment_of(size: int) -> str:
+    """A YAML document that is one comment, exactly ``size`` bytes long."""
+    return "#" + "x" * (size - 2) + "\n"
+
+
+def _cap(module: str, name: str) -> int:
+    import importlib
+
+    return getattr(importlib.import_module(f"soup_cli.{module}"), name)
+
+
+#: reader id -> (module, name of its cap, how it words a file one byte over the cap)
+_READER_CAPS = {
+    "commands/plan.py": (
+        "utils.yaml_limits", "MAX_CONFIG_BYTES",
+        "config 'soup.yaml' is larger than {cap} bytes; refusing",
+    ),
+    "eval/gate.py": (
+        "utils.yaml_limits", "MAX_CONFIG_BYTES",
+        "eval-gate suite 'gate.yaml' is larger than {cap} bytes; refusing",
+    ),
+    "eval/judge.py": (
+        "utils.yaml_limits", "MAX_CONFIG_BYTES",
+        "Rubric file rubric.yaml is larger than {cap} bytes; refusing",
+    ),
+    "migrate/axolotl.py": (
+        "utils.yaml_limits", "MAX_CONFIG_BYTES",
+        "Config file ax.yaml is larger than {cap} bytes; refusing",
+    ),
+    "migrate/llamafactory.py": (
+        "utils.yaml_limits", "MAX_CONFIG_BYTES",
+        "Config file lf.yaml is larger than {cap} bytes; refusing",
+    ),
+    "utils/agent_forge.py": (
+        "utils.agent_forge", "_MAX_SPEC_BYTES", "spec file exceeds {cap} bytes",
+    ),
+    "utils/build_dag.py": ("utils.build_dag", "_MAX_FILE_BYTES", "build text exceeds {cap} bytes"),
+    "utils/expectations.py": (
+        "utils.expectations", "_MAX_FILE_BYTES", "suite text exceeds {cap} bytes",
+    ),
+    "utils/recipe_dag.py": (
+        "utils.recipe_dag", "_MAX_FILE_BYTES", "recipe text exceeds {cap} bytes",
+    ),
+    "utils/checklist_dsl.py": (
+        "utils.checklist_dsl", "_MAX_FILE_BYTES", "spec file too large ({over} > {cap})",
+    ),
+    "utils/data_mix.py": (
+        "utils.data_mix", "_MAX_RECIPE_BYTES", "recipe exceeds {cap} bytes cap",
+    ),
+    "utils/mix_proxy.py": (
+        "utils.yaml_limits", "MAX_CONFIG_BYTES",
+        "base YAML is larger than {cap} bytes; refusing",
+    ),
+    "utils/ra_dit_run.py": (
+        "utils.ra_dit_run", "_MAX_YAML_BYTES", "config YAML exceeds {kib}KB cap",
+    ),
+    "utils/save_formats.py": (
+        "utils.save_formats", "_MAX_QUANT_CONFIG_BYTES",
+        "quant_config too large ({over} bytes; cap {cap})",
+    ),
+    "utils/sweep_config.py": (
+        "utils.sweep_config", "_MAX_FILE_BYTES", "sweep yaml exceeds {cap} bytes",
+    ),
+}
+
+_SIZE_WORDS = re.compile(r"larger than|exceeds|too large")
+
+
+def test_every_raising_reader_has_a_cap_case():
+    assert set(_READER_CAPS) == set(_RAISING_READERS)
+
+
+@pytest.mark.parametrize("reader", sorted(_READER_CAPS))
+def test_reader_refuses_a_document_one_byte_over_its_cap(tmp_path, monkeypatch, reader):
+    monkeypatch.chdir(tmp_path)
+    module, name, wording = _READER_CAPS[reader]
+    cap = _cap(module, name)
+    expected = wording.format(cap=cap, over=cap + 1, kib=cap // 1024)
+    with pytest.raises(ValueError) as raised:
+        _RAISING_READERS[reader][0](_comment_of(cap + 1))
+    assert expected in str(raised.value), str(raised.value)
+
+
+@pytest.mark.parametrize("reader", sorted(_READER_CAPS))
+def test_reader_does_not_refuse_a_document_exactly_at_its_cap_for_size(
+    tmp_path, monkeypatch, reader
+):
+    monkeypatch.chdir(tmp_path)
+    module, name, _ = _READER_CAPS[reader]
+    try:
+        _RAISING_READERS[reader][0](_comment_of(_cap(module, name)))
+    except (ValueError, TypeError) as exc:  # an empty document is not a valid one
+        assert not _SIZE_WORDS.search(str(exc)), str(exc)
+
+
+def test_deploy_template_detection_falls_back_one_byte_over_its_cap(tmp_path, monkeypatch):
+    from soup_cli.commands.deploy import _auto_detect_template
+    from soup_cli.utils.yaml_limits import MAX_CONFIG_BYTES
+
+    monkeypatch.chdir(tmp_path)
+    base = "data:\n  format: chatml\n"
+    _write("soup.yaml", base + _comment_of(MAX_CONFIG_BYTES - len(base)))
+    assert _auto_detect_template() is not None
+    _write("soup.yaml", base + _comment_of(MAX_CONFIG_BYTES - len(base) + 1))
+    assert _auto_detect_template() is None
+
+
+def test_push_training_config_falls_back_one_byte_over_its_cap(tmp_path, monkeypatch):
+    from soup_cli.commands.push import _load_training_config
+    from soup_cli.utils.yaml_limits import MAX_CONFIG_BYTES
+
+    monkeypatch.chdir(tmp_path)
+    base = "base: some/model\n"
+    _write("training_config.yaml", base + _comment_of(MAX_CONFIG_BYTES - len(base)))
+    assert _load_training_config(tmp_path) == {"base": "some/model"}
+    _write("training_config.yaml", base + _comment_of(MAX_CONFIG_BYTES - len(base) + 1))
+    assert _load_training_config(tmp_path) == {}
+
+
+def test_license_frontmatter_falls_back_one_byte_over_its_cap(tmp_path, monkeypatch):
+    from soup_cli.utils import license_matrix
+
+    monkeypatch.chdir(tmp_path)
+    cap = license_matrix._MAX_FRONTMATTER_BYTES
+    readme = str(tmp_path / "README.md")
+    head, tail = "---\nlicense: mit\n", "---\nbody\n"
+    _write("README.md", head + _comment_of(cap - len(head) - len(tail)) + tail)
+    assert license_matrix._license_from_frontmatter(readme) == "mit"
+    _write("README.md", head + _comment_of(cap - len(head) - len(tail) + 1) + tail)
+    assert license_matrix._license_from_frontmatter(readme) is None
+
+
+#: Every call of the limited loader names its cap: a module constant, never a number.
+_CAP_NAMES = {
+    "cans/unpack.py": {"MAX_CONFIG_BYTES", "MAX_MANIFEST_BYTES"},
+    "commands/adapters.py": {"MAX_CONFIG_BYTES"},
+    "commands/deploy.py": {"MAX_CONFIG_BYTES"},
+    "commands/plan.py": {"MAX_CONFIG_BYTES"},
+    "commands/push.py": {"MAX_CONFIG_BYTES"},
+    "commands/recipes.py": {"MAX_CONFIG_BYTES"},
+    "config/loader.py": {"MAX_CONFIG_BYTES", "limit"},
+    "eval/gate.py": {"MAX_CONFIG_BYTES"},
+    "eval/judge.py": {"MAX_CONFIG_BYTES"},
+    "migrate/axolotl.py": {"MAX_CONFIG_BYTES"},
+    "migrate/llamafactory.py": {"MAX_CONFIG_BYTES"},
+    "utils/agent_forge.py": {"_MAX_SPEC_BYTES"},
+    "utils/build_dag.py": {"_MAX_FILE_BYTES"},
+    "utils/checklist_dsl.py": {"_MAX_FILE_BYTES"},
+    "utils/data_mix.py": {"_MAX_RECIPE_BYTES"},
+    "utils/expectations.py": {"_MAX_FILE_BYTES"},
+    "utils/license_matrix.py": {"_MAX_FRONTMATTER_BYTES"},
+    "utils/mix_proxy.py": {"MAX_CONFIG_BYTES"},
+    "utils/ra_dit_run.py": {"_MAX_YAML_BYTES"},
+    "utils/recipe_dag.py": {"_MAX_FILE_BYTES"},
+    "utils/save_formats.py": {"_MAX_QUANT_CONFIG_BYTES"},
+    "utils/sweep_config.py": {"_MAX_FILE_BYTES"},
+}
+
+
+def test_every_limited_read_names_its_cap():
+    found: dict[str, set[str]] = {}
+    for file in sorted(SRC.rglob("*.py")):
+        rel = file.relative_to(SRC).as_posix()
+        if rel == LOADER_MODULE:
+            continue
+        for node in ast.walk(ast.parse(file.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            called = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if called not in _LIMITED_READS:
+                continue
+            caps = [keyword.value for keyword in node.keywords if keyword.arg == "max_bytes"]
+            assert len(caps) == 1, f"{rel}:{node.lineno} must pass max_bytes by keyword"
+            assert isinstance(caps[0], ast.Name), f"{rel}:{node.lineno} max_bytes must be a name"
+            found.setdefault(rel, set()).add(caps[0].id)
+    assert found == _CAP_NAMES
+
+
+# ---------------------------------------------------------------------------
+# A reader's message quotes the path it was given: it is printed escaped
+# ---------------------------------------------------------------------------
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_MARKED = "[bold]x.yaml"  # an opening tag Rich would otherwise consume
+
+_VALID_CONFIG = (
+    "base: meta-llama/Llama-3.1-8B-Instruct\ntask: sft\n"
+    "data:\n  train: ./data.jsonl\n  format: alpaca\noutput: ./output\n"
+)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["eval", "gate", "--suite", _MARKED],
+        ["eval", "judge", "--rubric", _MARKED, "--target", "t.jsonl", "--model", "m"],
+        ["train", "--config", "soup.yaml", "--gate", _MARKED, "--dry-run"],
+        ["export", "--model", "./merged", "--format", "torchao", "--quant-config", _MARKED],
+    ],
+    ids=["eval-gate", "eval-judge", "train-gate", "export-quant-config"],
+)
+def test_command_prints_a_path_with_markup_as_typed(tmp_path, monkeypatch, argv):
+    from soup_cli.cli import app
+
+    monkeypatch.chdir(tmp_path)
+    _write("soup.yaml", _VALID_CONFIG)
+    _write("t.jsonl", '{"prompt": "p", "response": "r"}\n')
+    Path("merged").mkdir()
+    result = CliRunner().invoke(app, argv)
+    output = " ".join(_ANSI_RE.sub("", result.output).split())
+    assert result.exit_code != 0, output
+    assert _MARKED in output, (output, repr(result.exception))
