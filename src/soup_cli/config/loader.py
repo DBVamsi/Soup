@@ -3,7 +3,6 @@
 import warnings
 from pathlib import Path
 
-import yaml
 from pydantic import ValidationError
 from rich.console import Console
 
@@ -12,6 +11,12 @@ from soup_cli.config.schema import SoupConfig
 from soup_cli.config.staged_fields import find_staged_config_fields, format_staged_fields
 from soup_cli.config.unknown_keys import find_unknown_config_keys, format_unknown_keys
 from soup_cli.utils.terminal import for_terminal
+from soup_cli.utils.yaml_limits import (
+    MAX_CONFIG_BYTES,
+    YamlLimitError,
+    load_yaml_file_limited,
+    load_yaml_limited,
+)
 
 console = Console()
 
@@ -130,9 +135,21 @@ def load_config(
     ``training_overrides`` are merged into the YAML ``training:`` mapping
     *before* ``SoupConfig`` is constructed, so CLI flags that map onto
     training fields participate in the same cross-validators as YAML.
+
+    The file is read under the limits of :mod:`soup_cli.utils.yaml_limits`
+    (at most :data:`MAX_CONFIG_BYTES`, bounded nesting and alias expansion);
+    a file over one of them exits 1 with a message naming the file and the
+    limit, before anything walks the document.
     """
     path = Path(path)
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        raw = load_yaml_file_limited(
+            path, f"Config file {path}", max_bytes=MAX_CONFIG_BYTES
+        )
+    except YamlLimitError as exc:
+        # The message quotes the path it was given.
+        console.print(f"[red]{for_terminal(str(exc))}[/]")
+        raise SystemExit(1) from exc
 
     if raw is None:
         console.print("[red]Config file is empty[/]")
@@ -180,9 +197,11 @@ def load_config_from_string(yaml_str: str) -> SoupConfig:
     """Parse a YAML string and return validated SoupConfig.
 
     Unlike load_config(), raises ValueError on errors instead of SystemExit,
-    making it suitable for API/UI usage.
+    making it suitable for API/UI usage. The text is held to the same limits
+    as a config file; crossing one raises
+    :class:`~soup_cli.utils.yaml_limits.YamlLimitError`, a ``ValueError``.
     """
-    raw = yaml.safe_load(yaml_str)
+    raw = load_yaml_limited(yaml_str, "Config", max_bytes=MAX_CONFIG_BYTES)
     if raw is None:
         raise ValueError("Config is empty")
     if not isinstance(raw, dict):
