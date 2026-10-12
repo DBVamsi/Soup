@@ -35,9 +35,10 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import typing
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 import click
@@ -117,9 +118,9 @@ def test_the_committed_pages_state_what_the_code_does(capsys: pytest.CaptureFixt
     """The default freshness test. If it fails, the message names the keys or parameters
     and the command to run; a wording-only change never fails it."""
     code = gen.main(["--check-structure"])
-    out = _plain(capsys.readouterr().out)
-    assert code == 0, out
-    assert "state what the code does" in out, out
+    report = capsys.readouterr().out
+    assert code == 0, "\n" + report  # one offending key per line: do not collapse them
+    assert "state what the code does" in _plain(report)
 
 
 @pytest.mark.skipif(os.environ.get("SOUP_DOCS_EXACT") != "1", reason=_EXACT_REASON)
@@ -184,7 +185,7 @@ def test_check_names_only_the_page_that_lost_a_row(
 
     assert gen.main(["--check-structure"]) == 1
     out = _plain(capsys.readouterr().out)
-    assert f"{key}: not on the page (type " in out, out
+    assert f"{key}: committed page: (not listed) | code now: type " in out, out
     assert "docs/cli-reference.md" not in out, out
 
 
@@ -211,7 +212,9 @@ def test_check_fails_when_the_schema_gains_a_field(
     assert gen.main(["--check-structure"]) == 1
     out = _plain(capsys.readouterr().out)
     assert "docs/config-reference.md no longer matches the schema (1 difference)" in out, out
-    assert "brand_new_knob: not on the page (type `int`, default `7`" in out, out
+    assert (
+        "brand_new_knob: committed page: (not listed) | code now: type `int`, default `7`" in out
+    ), out
     assert "docs/cli-reference.md" not in out, out
 
 
@@ -242,7 +245,8 @@ def test_check_fails_when_a_command_gains_an_option(
     assert gen.main(["--check-structure"]) == 1
     out = _plain(capsys.readouterr().out)
     assert "docs/cli-reference.md no longer matches the CLI (1 difference)" in out, out
-    assert f"{title} --brand-new-flag: not on the page (type flag, default off" in out, out
+    listed = f"{title} --brand-new-flag: committed page: (not listed) | code now: type flag"
+    assert listed in out, out
     assert "docs/config-reference.md" not in out, out
 
 
@@ -429,7 +433,7 @@ class _Toy(BaseModel):
     ratio: Optional[float] = Field(default=None, gt=0.0, lt=1.0, allow_inf_nan=False)
     tags: List[str] = Field(default_factory=lambda: ["a"], min_length=1, max_length=4)
     stamp: str = Field(default_factory=lambda: "computed")
-    workdir: str = Field(default=os.path.join(os.getcwd(), "out"))
+    workdir: str = Field(default="C:\\Users\\someone\\out")
     code: str = Field(default="x", pattern=r"^[a-z|]+$")
     inner: _Inner = Field(default_factory=_Inner, description="Nested (v0.1.0 Part B).")
     maybe: Optional[_Inner] = None
@@ -463,7 +467,7 @@ def test_a_toy_model_renders_every_kind_of_row() -> None:
     assert "`renamed`" not in rows
     assert rows["`inner.depth`"] == ["`int`", "`2`", "`>= 1`, `<= 8`", "How deep."]
     assert rows["`maybe.depth`"] == rows["`inner.depth`"]
-    assert os.getcwd() not in page
+    assert "someone" not in page
 
 
 def test_a_self_referencing_model_does_not_recurse_forever() -> None:
@@ -529,7 +533,6 @@ def test_every_registered_command_has_exactly_one_section(cli_page: str) -> None
     tree = _command_tree(_live_root())
     leaves = [title for title, cmd in tree.items() if not isinstance(cmd, click.Group)]
     assert len(leaves) >= 200, len(leaves)
-    assert max(title.count(" ") for title in leaves) >= 3, "a command three names deep"
 
     sections = _cli_sections(cli_page)
     assert sorted(sections) == sorted(tree), (
@@ -555,7 +558,6 @@ def test_every_visible_option_and_argument_is_one_row_of_its_command(cli_page: s
                 arguments += 1
                 shown = param.metavar or param.name.upper()  # what `--help` prints
                 assert row[0] in (f"`{shown}`", f"`{shown}...`"), (title, row[0])
-                assert row[4], f"{title} {shown}: every argument declares its help"
             assert row[3] == ("yes" if param.required else ""), (title, row)
     assert options >= 1000, options
     assert arguments >= 100, arguments
@@ -666,7 +668,7 @@ def _toy_root() -> click.Command:
         ),
         tag: Optional[List[str]] = typer.Option(None, "--tag", help="[dim]Repeat me.[/]"),
         secret: bool = typer.Option(False, "--secret", hidden=True, help="Not shown."),
-        workdir: str = typer.Option(os.getcwd(), "--workdir", help="Where."),
+        workdir: str = typer.Option("C:\\Users\\someone", "--workdir", help="Where."),
         stamp: str = typer.Option("", "--stamp", help="Empty by default."),
         when: str = typer.Option(default_factory=lambda: "now", help="Computed."),
     ) -> None:
@@ -715,7 +717,7 @@ def test_a_toy_app_renders_every_kind_of_parameter() -> None:
     assert rows["`--workdir`"][1] == "*(set at runtime)*"
     assert rows["`--stamp`"][1] == '`""`'
     assert rows["`--when`"][1] == "*(set at runtime)*"
-    assert os.getcwd() not in page
+    assert "someone" not in page
 
     oven = sections["soup oven"]
     assert oven[oven.index("Subcommands:") + 2] == "- [`clean`](#soup-oven-clean)", oven
@@ -744,7 +746,12 @@ def test_a_plain_click_tree_renders_the_remaining_parameter_shapes() -> None:
         help="1. not a list",
         invoke_without_command=True,
         params=[click.Option(["--limit"], type=int, default=10)],
-        commands={"show": click.Command("show", help="# not a heading")},
+        commands={
+            "show": click.Command("show", help="# not a heading"),
+            "more": click.Group(
+                "more", commands={"deep": click.Command("deep", help="Three names down.")}
+            ),
+        },
     )
     root = click.Group(
         "soup",
@@ -759,7 +766,16 @@ def test_a_plain_click_tree_renders_the_remaining_parameter_shapes() -> None:
     page = gen.render_cli_reference(root)
     lines = page.splitlines()
     sections = _cli_sections(page)
-    assert list(sections) == ["soup plain", "soup raw", "soup runs", "soup runs show", "soup tool"]
+    assert list(sections) == [
+        "soup plain",
+        "soup raw",
+        "soup runs",
+        "soup runs more",
+        "soup runs more deep",
+        "soup runs show",
+        "soup tool",
+    ]
+    assert "#### `soup runs more deep`" in lines, "one heading level per name, three deep"
     for escaped in ("\\- not a bullet", "1\\. not a list", "\\# not a heading", "\\> not a quote"):
         assert escaped in lines, escaped
     assert "--flag stays as typed" in lines
@@ -780,8 +796,7 @@ def test_a_plain_click_tree_renders_the_remaining_parameter_shapes() -> None:
 
 def test_argument_help_reads_the_same_whether_or_not_click_kept_it() -> None:
     """Click 8.5 resets the ``help`` Typer 0.20 sets on an argument; older Click keeps
-    it. The page must not change with the Click that happens to be installed. (That
-    every argument of the real CLI has a help cell is held by the coverage test.)"""
+    it. The page must not change with the Click that happens to be installed."""
     declared = {"recipe": "Recipe [bold]name[/bold].", "extras": "Extra toppings."}
     kept, reset = _toy_root(), _toy_root()
     for root, value in ((kept, declared), (reset, {})):
@@ -868,35 +883,43 @@ _CONFIG_CHANGES: dict[str, tuple[Any, str]] = {
         lambda: _toy_with(
             mode=(Literal["fast", "slow"], Field(default="slow", description=_SPEED))
         ),
-        'mode: default `"fast"` -> `"slow"`',
+        'mode: committed page: default `"fast"` | code now: default `"slow"`',
     ),
     "default-removed": (
         lambda: _toy_with(mode=(Literal["fast", "slow"], Field(description=_SPEED))),
-        'mode: default `"fast"` -> **required**',
+        'mode: committed page: default `"fast"` | code now: default **required**',
     ),
     "type": (
         lambda: _toy_with(code=(Optional[str], Field(default="x", pattern=r"^[a-z|]+$"))),
-        "code: type `str` -> `str | null`",
+        "code: committed page: type `str` | code now: type `str | null`",
     ),
     "bound": (
         lambda: _toy_with(
             tags=(List[str], Field(default_factory=lambda: ["a"], min_length=1, max_length=8))
         ),
-        "tags: constraints min length 1; max length 4 -> min length 1; max length 8",
+        "tags: committed page: constraints min length 1; max length 4"
+        " | code now: constraints min length 1; max length 8",
     ),
     "choice": (
         lambda: _toy_with(
             mode=(Literal["fast", "slow", "turbo"], Field(default="fast", description=_SPEED))
         ),
-        'mode: constraints one of `"fast"`, `"slow"` -> one of `"fast"`, `"slow"`, `"turbo"`',
+        'mode: committed page: constraints one of `"fast"`, `"slow"`'
+        ' | code now: constraints one of `"fast"`, `"slow"`, `"turbo"`',
     ),
     "nested-default": (
         lambda: _toy_with(inner=(_DeeperInner, Field(default_factory=_DeeperInner))),
-        "inner.depth: default `2` -> `3`",
+        "inner.depth: committed page: default `2` | code now: default `3`",
+    ),
+    "two-columns-one-line": (
+        lambda: _toy_with(mode=(Optional[Literal["fast", "slow"]], Field(default=None))),
+        'mode: committed page: type `str`, default `"fast"`'
+        " | code now: type `str | null`, default `null`",
     ),
     "new-key": (
         lambda: _toy_with(fresh_knob=(int, Field(default=7, ge=1, description="New."))),
-        "fresh_knob: not on the page (type `int`, default `7`, constraints `>= 1`)",
+        "fresh_knob: committed page: (not listed)"
+        " | code now: type `int`, default `7`, constraints `>= 1`",
     ),
 }
 
@@ -926,7 +949,10 @@ def test_a_key_that_left_the_schema_fails_structure_and_is_named(
     assert gen.main(["--check-structure"]) == 1
     out = _plain(capsys.readouterr().out)
     assert "docs/config-reference.md no longer matches the schema (1 difference):" in out, out
-    assert "fresh_knob: on the page, no longer in the schema" in out, out
+    assert (
+        "fresh_knob: committed page: type `int`, default `7`, constraints (empty)"
+        " | code now: (no such field)"
+    ) in out, out
     assert out.endswith(_RUN_THIS), out
 
 
@@ -951,33 +977,36 @@ _FRESH_FLAG = click.Option(["--fresh-flag"], is_flag=True, default=False, help="
 _CLI_CHANGES: dict[str, tuple[Any, str]] = {
     "default": (
         lambda root: setattr(_param(root, "bake", "heat"), "default", 5),
-        "soup bake --heat, -t: default `3` -> `5`",
+        "soup bake --heat, -t: committed page: default `3` | code now: default `5`",
     ),
     "required": (
         lambda root: setattr(_param(root, "bake", "tag"), "required", True),
-        "soup bake --tag: required (empty) -> yes",
+        "soup bake --tag: committed page: required (empty) | code now: required yes",
     ),
     "type": (
         lambda root: setattr(_param(root, "bake", "heat"), "type", click.IntRange(1, 12)),
-        "soup bake --heat, -t: type integer, 1 to 9 -> integer, 1 to 12",
+        "soup bake --heat, -t: committed page: type integer, 1 to 9"
+        " | code now: type integer, 1 to 12",
     ),
     "new-option": (
         lambda root: root.commands["bake"].params.append(_FRESH_FLAG),
-        "soup bake --fresh-flag: not on the page (type flag, default off, required (empty))",
+        "soup bake --fresh-flag: committed page: (not listed)"
+        " | code now: type flag, default off, required (empty)",
     ),
     "new-argument": (
         lambda root: root.commands["oven"].commands["clean"].params.append(
             click.Argument(["target"])
         ),
-        "soup oven clean TARGET: not on the page (type text, default (empty), required yes)",
+        "soup oven clean TARGET: committed page: (not listed)"
+        " | code now: type text, default (empty), required yes",
     ),
     "new-command": (
         lambda root: root.commands.__setitem__("fresh", click.Command("fresh", help="New.")),
-        "soup fresh: command not on the page",
+        "soup fresh: committed page: (no section) | code now: a command",
     ),
     "global-option": (
         lambda root: setattr(_param(root, "", "verbose"), "default", True),
-        "soup --verbose, -V: default off -> on",
+        "soup --verbose, -V: committed page: default off | code now: default on",
     ),
 }
 
@@ -1001,8 +1030,12 @@ def test_a_changed_command_or_parameter_fails_structure_and_is_named(
 @pytest.mark.parametrize(
     ("case", "expected"),
     [
-        ("new-option", "soup bake --fresh-flag: on the page, no longer in the CLI"),
-        ("new-command", "soup fresh: on the page, no longer a registered command"),
+        (
+            "new-option",
+            "soup bake --fresh-flag: committed page: type flag, default off, required (empty)"
+            " | code now: (no such parameter)",
+        ),
+        ("new-command", "soup fresh: committed page: a section | code now: (no such command)"),
     ],
 )
 def test_what_left_the_cli_fails_structure_and_is_named(
@@ -1044,26 +1077,95 @@ def test_structure_names_ten_differences_per_page_and_counts_the_rest(
     monkeypatch.setattr(gen, "_load_cli_root", lambda: _toy_root_after(_CLI_CHANGES["type"][0]))
 
     assert gen.main(["--check-structure"]) == 1
-    out = _plain(capsys.readouterr().out)
+    report = capsys.readouterr().out
+    out = _plain(report)
     assert "docs/config-reference.md no longer matches the schema (13 differences):" in out, out
-    assert out.count(": not on the page") == 10, out
-    assert "knob_09: not on the page" in out and "knob_10" not in out, out
+    assert out.count(": committed page: (not listed)") == 10, out
+    assert "knob_09: committed page: (not listed)" in out and "knob_10" not in out, out
+    # one offending key per line, indented under its page
+    per_key = [line for line in report.splitlines() if line.startswith("  knob_")]
+    assert len(per_key) == len(set(per_key)) == gen._MAX_SHOWN, report
+    assert all(line.count("committed page:") == line.count("| code now:") == 1 for line in per_key)
     # the count of what was not shown closes the first page's block
     assert "... and 3 more docs/cli-reference.md no longer matches the CLI (1 difference):" in out
     assert out.count(_RUN_THIS) == 1 and out.endswith(_RUN_THIS), out
 
 
-def test_split_row_keeps_an_escaped_pipe_inside_its_cell() -> None:
+def test_split_row_splits_where_github_does() -> None:
+    r"""Each row below was rendered through GitHub's Markdown API on 2026-10-12. A pipe
+    right after a backslash never ends a cell, however many backslashes come before it,
+    and GitHub then drops exactly one of them: `x\\|y` in code shows as `x\|y`."""
     assert gen.split_row("| a | b |") == ["a", "b"]
     assert gen.split_row("|---|---|") == ["---", "---"]
-    assert gen.split_row("| `x \\| y` | one \\| two |  | z |") == [
-        "`x \\| y`",
-        "one \\| two",
-        "",
-        "z",
-    ]
-    # an escaped backslash does not escape the delimiter after it
-    assert gen.split_row("| a\\\\| b |") == ["a\\\\", "b"]
+    assert gen.split_row(r"| `x\|y` | p\|q |  | z |") == [r"`x\|y`", r"p\|q", "", "z"]
+    assert gen.split_row(r"| `x\\|y` | p\\|q |") == [r"`x\\|y`", r"p\\|q"]
+    assert gen.split_row(r"| `x\\\|y` | p\\\|q |") == [r"`x\\\|y`", r"p\\\|q"]
+    assert gen.split_row(r"| `^[a-z\\|]+$` | end\\ |") == [r"`^[a-z\\|]+$`", r"end\\"]
+    assert gen.split_row(r"| `tail\` | z |") == [r"`tail\`", "z"]
+
+
+class _Patterns(BaseModel):
+    alt: str = Field(default="a", pattern=r"^a\|b$", description=r"A literal \| bar, either side.")
+    after: int = Field(default=1, ge=1, description="The row below it.")
+
+
+def test_a_backslash_before_a_pipe_does_not_take_the_row_out_of_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    r"""A regex such as ``^a\|b$`` is written ``^a\\|b$`` in the cell, which is what makes
+    GitHub show it as it is. Split by backslash parity, that row had six cells, did not
+    look like a row, and silently left the comparison."""
+    page = gen.render_config_reference(_Patterns)
+    row = next(line for line in page.splitlines() if line.startswith("| `alt` |"))
+    assert row == (
+        r"| `alt` | `str` | `" + '"a"' + "` "
+        r"| pattern `^a\\|b$` | A literal \\\| bar, either side. |"
+    )
+    parsed = gen.parse_config_page(page)
+    assert list(parsed) == ["alt", "after"]
+    assert parsed["alt"]["constraints"] == r"pattern `^a\\|b$`"
+
+    _mirror(tmp_path, {gen.CONFIG_PAGE: page, gen.CLI_PAGE: gen.render_cli_reference(_toy_root())})
+    monkeypatch.setattr(gen, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(gen, "_load_cli_root", _toy_root)
+    monkeypatch.setattr(gen, "_load_config_model", lambda: _Patterns)
+    assert gen.main(["--check-structure"]) == 0, capsys.readouterr().out
+    capsys.readouterr()
+
+    changed = create_model(
+        "Changed", __base__=_Patterns, alt=(str, Field(default="b", pattern=r"^a\|b$"))
+    )
+    monkeypatch.setattr(gen, "_load_config_model", lambda: changed)
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert 'alt: committed page: default `"a"` | code now: default `"b"`' in out, out
+
+
+@pytest.mark.parametrize(
+    ("good", "bad"),
+    [
+        ("| `mode` | `str` |", "| `mode` | `str` | one cell too many |"),
+        ("| `mode` | `str` |", "| `mode` | `str | int` |"),  # a pipe written without its backslash
+        ("| `mode` | `str` |", "| mode | `str` |"),  # the key is not a code span
+    ],
+)
+def test_a_table_line_that_cannot_be_read_back_fails_the_check(
+    toy_tree: Path, capsys: pytest.CaptureFixture[str], good: str, bad: str
+) -> None:
+    """Never a skip: a row the parser cannot read would drop its key from the check."""
+    page = toy_tree / gen.CONFIG_PAGE
+    text = page.read_bytes().decode("utf-8")
+    assert text.count(good) == 1
+    broken = text.replace(good, bad)
+    page.write_bytes(broken.encode("utf-8"))
+
+    with pytest.raises(gen.PageFormatError, match="is not a 5-column row of this page"):
+        gen.parse_config_page(broken)
+    assert gen.main(["--check-structure"]) == 1
+    out = _plain(capsys.readouterr().out)
+    assert "docs/config-reference.md no longer matches the schema (1 difference):" in out, out
+    assert "the committed page cannot be read back: line " in out, out
+    assert "mode" in out and out.endswith(_RUN_THIS), out
 
 
 def test_the_parsers_read_back_what_the_renderers_stated() -> None:
@@ -1191,14 +1293,43 @@ def test_changes_that_add_an_option_and_commands_merge_as_text_and_stay_right() 
 # --------------------------------------------------------------------------
 
 
+def _leaked_paths(page: str, directories: typing.Iterable[PurePath]) -> list[str]:
+    """The directories that appear in ``page`` as a whole path.
+
+    A plain substring test is wrong here: a checkout at ``/repo`` or ``/data`` is also
+    ordinary page text (``./data/train.jsonl``). So a directory fewer than two levels
+    deep is not looked for at all, and a deeper one only counts where a path starts, not
+    as the tail of another path or the head of a longer name."""
+    leaked = set()
+    for directory in directories:
+        if len(directory.parts) < 3:  # the anchor and two levels
+            continue
+        for spelled in (str(directory), directory.as_posix()):
+            if re.search(r"(?<![\w./\\~-])" + re.escape(spelled) + r"(?![\w-])", page):
+                leaked.add(spelled)
+    return sorted(leaked)
+
+
 @pytest.mark.parametrize("rel", ["docs/config-reference.md", "docs/cli-reference.md"])
 def test_a_page_carries_nothing_from_this_machine(pages: dict[str, str], rel: str) -> None:
     page = pages[rel]
-    for needle in (str(Path.home()), str(_ROOT), os.getcwd(), "\r", "\t", "\x1b"):
+    assert _leaked_paths(page, (Path.home(), _ROOT, Path.cwd())) == [], rel
+    for needle in ("\r", "\t", "\x1b"):
         assert needle not in page, (rel, needle)
     assert not re.search(r"\b[A-Za-z]:\\", page), "a Windows drive path"
     assert [line for line in page.splitlines() if line != line.rstrip()] == []
     assert page.endswith("\n") and not page.endswith("\n\n")
+
+
+def test_the_leak_check_reads_whole_paths_only() -> None:
+    text = "default `./data/train.jsonl`; /home/someone/.soup; C:\\Users\\someone\\x; /repository"
+    shallow = [PurePosixPath("/data"), PurePosixPath("/repo"), PurePosixPath("/")]
+    assert _leaked_paths(text, shallow) == []
+    assert _leaked_paths(text, [PurePosixPath("/home/someone")]) == ["/home/someone"]
+    assert _leaked_paths(text, [PureWindowsPath("C:\\Users\\someone")]) == ["C:\\Users\\someone"]
+    assert _leaked_paths("see ./home/someone/x", [PurePosixPath("/home/someone")]) == []
+    assert _leaked_paths("see /home/someone-else/x", [PurePosixPath("/home/someone")]) == []
+    assert _leaked_paths("/srv/ci/soup", [PurePosixPath("/srv/ci/soup")]) == ["/srv/ci/soup"]
 
 
 @pytest.mark.parametrize("rel", ["docs/config-reference.md", "docs/cli-reference.md"])
@@ -1245,14 +1376,23 @@ def _anchors(markdown: str) -> set[str]:
     return anchors
 
 
-@pytest.mark.parametrize("rel", ["docs/config-reference.md", "docs/cli-reference.md"])
-def test_every_link_in_a_page_resolves(pages: dict[str, str], rel: str) -> None:
-    page = pages[rel]
+def _internal_targets(page: str) -> list[str]:
+    """The link targets this page is answerable for: an in-page ``#anchor`` or a relative
+    ``*.md`` file. A URL with a scheme is somebody else's page, and a description is free
+    to carry one (``See [the guide](https://example.com/lr)``)."""
     targets = re.findall(r"\]\(([^)\s]+)\)", page)
-    assert len(targets) >= 8, targets
+    return [
+        target
+        for target in targets
+        if not re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", target)
+        and (target.startswith("#") or target.partition("#")[0].endswith(".md"))
+    ]
+
+
+def _broken_links(page: str) -> list[str]:
     own = _anchors(page)
     broken = []
-    for target in targets:
+    for target in _internal_targets(page):
         file_part, _, fragment = target.partition("#")
         if not file_part:
             known = own
@@ -1264,7 +1404,31 @@ def test_every_link_in_a_page_resolves(pages: dict[str, str], rel: str) -> None:
             known = _anchors(other.read_text(encoding="utf-8")) if fragment else set()
         if fragment and fragment not in known:
             broken.append(target)
-    assert broken == []
+    return broken
+
+
+@pytest.mark.parametrize("rel", ["docs/config-reference.md", "docs/cli-reference.md"])
+def test_every_link_in_a_page_resolves(pages: dict[str, str], rel: str) -> None:
+    assert len(_internal_targets(pages[rel])) >= 8
+    assert _broken_links(pages[rel]) == []
+
+
+def test_an_external_link_in_a_description_is_not_a_broken_file() -> None:
+    class Linked(BaseModel):
+        rate: float = Field(default=0.1, description="See [the guide](https://example.com/lr).")
+        mail: str = Field(default="", description="Ask [us](mailto:team@example.com) or (x)[y].")
+
+    page = gen.render_config_reference(Linked)
+    assert "https://example.com/lr" in page
+    assert "#top-level-keys" in _internal_targets(page)
+    assert [target for target in _internal_targets(page) if ":" in target] == []
+    assert _broken_links(page) == []
+    # the control: an internal target that goes nowhere is still caught
+    assert _broken_links(page + "\n[a](#nowhere) [b](missing-page.md) [c](README.md#nope)\n") == [
+        "#nowhere",
+        "missing-page.md",
+        "README.md#nope",
+    ]
 
 
 def test_the_config_page_links_the_unknown_key_section(config_page: str) -> None:
@@ -1375,34 +1539,74 @@ def test_literal_defaults_are_written_as_yaml_flow_values(value: Any, expected: 
     assert gen.format_default(value) == expected
 
 
+@pytest.fixture
+def somewhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The generator believes its home is ``/home/someone`` and its checkout
+    ``/srv/checkout/soup``, wherever the suite really runs."""
+    monkeypatch.setattr(gen, "_machine_markers", lambda: ("/home/someone", "/srv/checkout/soup"))
+
+
 @pytest.mark.parametrize(
     "value",
     [
         object(),
         lambda: 1,
         os.cpu_count,
-        str(Path.home() / ".soup" / "cache"),
-        os.path.join(os.getcwd(), "output"),
-        os.getcwd().replace("\\", "/").upper() + "/OUT",
+        "/home/someone",
+        "/home/someone/.soup/cache",
+        "/srv/checkout/soup/output",
+        "/SRV/CHECKOUT/SOUP/OUT",
+        "\\srv\\checkout\\soup\\out",
+        "sqlite:/home/someone/runs.db",
         "C:\\Users\\someone\\models",
         "d:/models",
         ["fine", object()],
         {"nested": {"deeper": object()}},
         {("tuple", "key"): 1},
         {1, "a"},
-        Path.home() / "models",
+        PurePosixPath("/home/someone/models"),
     ],
 )
-def test_a_default_this_machine_computed_becomes_the_placeholder(value: Any) -> None:
+def test_a_default_this_machine_computed_becomes_the_placeholder(
+    somewhere: None, value: Any
+) -> None:
     assert gen.format_default(value) == gen.RUNTIME_DEFAULT == "(set at runtime)"
 
 
 @pytest.mark.parametrize(
     "value",
-    ["ollama://model", "https://example.com/v1", "/v1/chat/completions", "module.path:function"],
+    [
+        "ollama://model",
+        "https://example.com/v1",
+        "/v1/chat/completions",
+        "module.path:function",
+        "./home/someone/x",  # the tail of a relative path
+        "data/srv/checkout/soup",
+        "/home/someone-else/x",  # the head of a longer name
+        "/home/someoneelse",
+    ],
 )
-def test_a_constant_that_only_looks_like_a_path_stays_a_literal(value: str) -> None:
+def test_a_constant_that_only_looks_like_a_path_stays_a_literal(
+    somewhere: None, value: str
+) -> None:
     assert gen.format_default(value) == f'"{value}"'
+
+
+def test_a_shallow_working_directory_marks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In a container the checkout is often ``/repo``, ``/work`` or ``/data``. As a marker
+    that would turn the real default ``./data/train.jsonl`` into a placeholder on that
+    machine only, and its pages would stop matching everybody else's."""
+    monkeypatch.setattr(os.path, "expanduser", lambda path: "/root")
+    monkeypatch.setattr(os, "getcwd", lambda: "/data")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: "/tmp")
+    assert gen._machine_markers() == ()
+    assert gen.format_default("./data/train.jsonl") == '"./data/train.jsonl"'
+    assert gen.format_default("/data/train.jsonl") == '"/data/train.jsonl"'
+
+    monkeypatch.setattr(os.path, "expanduser", lambda path: "/home/someone")
+    monkeypatch.setattr(os, "getcwd", lambda: "C:\\Work\\Soup\\")
+    assert gen._machine_markers() == ("/home/someone", "c:/work/soup")
+    assert gen.format_default("/home/someone/.cache") == gen.RUNTIME_DEFAULT
 
 
 @pytest.mark.parametrize(

@@ -61,7 +61,7 @@ import typing
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import click
 from pydantic import BaseModel
@@ -238,22 +238,29 @@ class _Slugger:
 
 
 def _machine_markers() -> tuple[str, ...]:
-    """This machine's home, working and temp directories, normalised for matching."""
+    """This machine's home, working and temp directories, normalised for matching.
+
+    Only those at least two directories deep. A checkout at ``/repo`` or ``/data`` (a
+    container's working directory) is also an ordinary piece of a relative default such
+    as ``./data/train.jsonl``, and must not turn that default into a placeholder there.
+    """
     found = set()
     for raw in (os.path.expanduser("~"), os.getcwd(), tempfile.gettempdir()):
         marker = raw.replace("\\", "/").rstrip("/").casefold()
-        if len(marker) > 4:  # "/", "c:" and "/tmp" would match constants
+        if marker.count("/") >= 2:  # "/home/u" and "c:/users/u"; not "/repo", "/tmp", "c:"
             found.add(marker)
     return tuple(sorted(found))
 
 
 def _is_machine_specific(text: str) -> bool:
-    """True for a string only this machine could have produced."""
+    """True for a string only this machine could have produced: a Windows drive path, or
+    one of this machine's directories as a whole path (never as the tail of another)."""
     normalised = text.replace("\\", "/").casefold()
     if re.match(r"^[a-z]:/", normalised):
-        return True  # a Windows drive path
+        return True
     return any(
-        re.search(re.escape(marker) + r"(?=/|$)", normalised) for marker in _machine_markers()
+        re.search(r"(?<![\w./~-])" + re.escape(marker) + r"(?=/|$)", normalised)
+        for marker in _machine_markers()
     )
 
 
@@ -994,38 +1001,44 @@ def _first_difference(committed: str, fresh: str) -> list[str]:
     ]
 
 
+class PageFormatError(ValueError):
+    """A table line on a page that is not a row this generator writes."""
+
+
+#: GitHub ends a cell at a ``|`` unless a backslash stands right before it, whatever
+#: comes before that backslash: ``a\|b`` and ``a\\|b`` are both ONE cell (rendered
+#: ``a|b`` and ``a\|b``). Read off GitHub's own renderer, not assumed.
+_CELL_END = re.compile(r"(?<!\\)\|")
+_HEADER_CELLS = frozenset({"Key", "Name", "Command"})
+
+
 def split_row(line: str) -> list[str]:
-    """The cells of one Markdown table row. A backslash escapes the next character, so
-    ``\\|`` (in prose or inside a code span) stays inside its cell, as GitHub reads it."""
-    cells: list[str] = []
-    current: list[str] = []
-    escaped = False
-    for char in line.strip():
-        if escaped or char != "|":
-            current.append(char)
-            escaped = char == "\\" and not escaped
-        else:
-            cells.append("".join(current).strip())
-            current = []
-    cells.append("".join(current).strip())
-    return cells[1:-1]  # nothing before the first delimiter, nothing after the last
+    """The cells of one Markdown table row, split where GitHub splits it."""
+    return [cell.strip() for cell in _CELL_END.split(line.strip())[1:-1]]
 
 
-def _data_cells(line: str, columns: int) -> list[str] | None:
-    """The cells of a body row of one of the generated tables, else ``None``: the first
-    cell of every body row is a code span, which a header or a rule line never is."""
+def _data_cells(line: str, lineno: int, columns: int) -> list[str] | None:
+    """The cells of a body row; ``None`` for a line that is no table line, or is a header
+    or a rule. A table line that is none of those raises: skipping a row that does not
+    parse would take its key out of the comparison without a word."""
     if not line.startswith("|"):
         return None
     cells = split_row(line)
-    return cells if len(cells) == columns and cells[0].startswith("`") else None
+    if set(line) <= set("|-: ") or (cells and cells[0] in _HEADER_CELLS):
+        return None
+    if len(cells) != columns or not cells[0].startswith("`"):
+        raise PageFormatError(
+            f"line {lineno} is not a {columns}-column row of this page: {line[:70]}"
+        )
+    return cells
 
 
 def parse_config_page(text: str) -> dict[str, dict[str, str]]:
     """``{key: {"type": ..., "default": ..., "constraints": ...}}``, read back from the
     tables of a config page. The description column is left out on purpose."""
     keys: dict[str, dict[str, str]] = {}
-    for line in text.split("\n"):
-        cells = _data_cells(line, 5)
+    for lineno, line in enumerate(text.split("\n"), start=1):
+        cells = _data_cells(line, lineno, 5)
         if cells is not None:
             keys[cells[0].replace("`", "")] = {
                 "type": cells[1],
@@ -1041,7 +1054,7 @@ def parse_cli_page(text: str) -> dict[str, dict[str, dict[str, str]]]:
     usage line and the command summary are left out on purpose."""
     commands: dict[str, dict[str, dict[str, str]]] = {}
     current: dict[str, dict[str, str]] | None = None
-    for line in text.split("\n"):
+    for lineno, line in enumerate(text.split("\n"), start=1):
         if line.startswith("#"):
             title = line.lstrip("#").strip().replace("`", "")
             if title == "Global options":
@@ -1051,7 +1064,7 @@ def parse_cli_page(text: str) -> dict[str, dict[str, dict[str, str]]]:
             continue
         if current is None:
             continue
-        cells = _data_cells(line, 5)
+        cells = _data_cells(line, lineno, 5)
         if cells is not None:
             current[cells[0].replace("`", "")] = {
                 "type": cells[1],
@@ -1065,62 +1078,86 @@ def _shown(cell: str) -> str:
     return cell.replace("\\|", "|") or "(empty)"
 
 
+def _stated(cells: dict[str, str], columns: Sequence[str] | None = None) -> str:
+    chosen = cells if columns is None else {column: cells[column] for column in columns}
+    return ", ".join(f"{column} {_shown(cell)}" for column, cell in chosen.items())
+
+
 def _item_drift(
-    label: str, old: dict[str, str] | None, new: dict[str, str] | None, gone: str
+    label: str, old: dict[str, str] | None, new: dict[str, str] | None, absent: str
 ) -> list[str]:
-    """The differences for one key or one parameter, as lines of the report."""
+    """One line for a key or a parameter whose row differs, each side named: what the
+    committed page states, then what the code states now."""
     if new is None:
-        return [f"{label}: on the page, {gone}"]
+        assert old is not None
+        return [f"{label}: committed page: {_stated(old)} | code now: {absent}"]
     if old is None:
-        stated = ", ".join(f"{column} {_shown(cell)}" for column, cell in new.items())
-        return [f"{label}: not on the page ({stated})"]
+        return [f"{label}: committed page: (not listed) | code now: {_stated(new)}"]
+    changed = [column for column in new if old[column] != new[column]]
+    if not changed:
+        return []
     return [
-        f"{label}: {column} {_shown(old[column])} -> {_shown(cell)}"
-        for column, cell in new.items()
-        if old[column] != cell
+        f"{label}: committed page: {_stated(old, changed)} | code now: {_stated(new, changed)}"
     ]
 
 
-def config_drift(committed: str, fresh: str) -> list[str]:
-    """What the committed config page states differently from a fresh render."""
-    old, new = parse_config_page(committed), parse_config_page(fresh)
+def config_drift(
+    old: dict[str, dict[str, str]], new: dict[str, dict[str, str]]
+) -> list[str]:
+    """One line per key the committed config page states differently from the schema."""
     lines: list[str] = []
     for key in dict.fromkeys([*new, *old]):
-        lines += _item_drift(key, old.get(key), new.get(key), "no longer in the schema")
+        lines += _item_drift(key, old.get(key), new.get(key), "(no such field)")
     return lines
 
 
-def cli_drift(committed: str, fresh: str) -> list[str]:
-    """What the committed CLI page states differently from a fresh render."""
-    old, new = parse_cli_page(committed), parse_cli_page(fresh)
+def cli_drift(
+    old: dict[str, dict[str, dict[str, str]]], new: dict[str, dict[str, dict[str, str]]]
+) -> list[str]:
+    """One line per command or parameter the committed CLI page states differently."""
     lines: list[str] = []
     for command in dict.fromkeys([*new, *old]):
         if command not in old:
-            lines.append(f"{command}: command not on the page")
+            lines.append(f"{command}: committed page: (no section) | code now: a command")
         elif command not in new:
-            lines.append(f"{command}: on the page, no longer a registered command")
+            lines.append(f"{command}: committed page: a section | code now: (no such command)")
         else:
             was, now = old[command], new[command]
             for name in dict.fromkeys([*now, *was]):
                 lines += _item_drift(
-                    f"{command} {name}", was.get(name), now.get(name), "no longer in the CLI"
+                    f"{command} {name}", was.get(name), now.get(name), "(no such parameter)"
                 )
     return lines
 
 
+def _page_drift(
+    parse: Callable[[str], Any],
+    compare: Callable[[Any, Any], list[str]],
+    committed: str,
+    fresh: str,
+) -> list[str]:
+    new = parse(fresh)  # a render that cannot be read back is a bug in here: let it raise
+    try:
+        old = parse(committed)
+    except PageFormatError as error:
+        return [f"the committed page cannot be read back: {error}"]
+    return compare(old, new)
+
+
 def structure_drift(root: Path, pages: dict[str, str]) -> dict[str, list[str]]:
     """``{page: differences}`` for every page under ``root`` whose tables no longer state
-    what the code does. Wording is not looked at; a missing page is one difference."""
+    what the code does. Wording is not looked at. A missing page is one difference, and
+    so is a committed page with a table line that cannot be read back."""
     found: dict[str, list[str]] = {}
     for rel, fresh in pages.items():
         committed = _committed(root, rel)
         if committed is None:
             found[rel] = ["the page is missing"]
-            continue
-        lines = (config_drift if rel == CONFIG_PAGE else cli_drift)(committed, fresh)
-        if lines:
-            found[rel] = lines
-    return found
+        elif rel == CONFIG_PAGE:
+            found[rel] = _page_drift(parse_config_page, config_drift, committed, fresh)
+        else:
+            found[rel] = _page_drift(parse_cli_page, cli_drift, committed, fresh)
+    return {rel: lines for rel, lines in found.items() if lines}
 
 
 def _report_structure(drift: dict[str, list[str]]) -> None:
