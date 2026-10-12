@@ -1,10 +1,11 @@
 """Every YAML document read under ``src/soup_cli`` goes through the limited loader.
 
 Two halves. The source scan keeps ``utils/yaml_limits.py`` the only module that
-calls a PyYAML loading function, so a new reader cannot skip the limits by
-accident. The reader table then drives each existing reader with a document
-past the node allowance and one past the nesting limit, and checks that the
-refusal comes out in that reader's own contract.
+can parse YAML: no other module may hold PyYAML except to write YAML or to
+catch its error class, and each one that does is listed here with exactly the
+attributes it uses. The reader table then drives each existing reader with a
+document past the node allowance and one past the nesting limit, and checks
+that the refusal comes out in that reader's own contract.
 """
 
 from __future__ import annotations
@@ -18,117 +19,204 @@ from soup_cli.utils.yaml_limits import MAX_YAML_NESTING, YamlLimitError
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "soup_cli"
 
-#: The one module allowed to call PyYAML's loading functions.
-ALLOWED = {"utils/yaml_limits.py"}
+#: The one module that parses YAML.
+LOADER_MODULE = "utils/yaml_limits.py"
 
-#: PyYAML entry points that turn text into objects or nodes.
-_LOADING_NAMES = frozenset(
-    {
-        "load",
-        "load_all",
-        "safe_load",
-        "safe_load_all",
-        "full_load",
-        "full_load_all",
-        "unsafe_load",
-        "unsafe_load_all",
-        "compose",
-        "compose_all",
-    }
-)
+#: What another module may take from PyYAML: writing, and the error class.
+_NOT_PARSING = frozenset({"safe_dump", "dump", "YAMLError"})
+
+#: Every other module that imports PyYAML, with the attributes it uses. A new
+#: entry needs one of ``_NOT_PARSING``; reading YAML goes through LOADER_MODULE.
+YAML_USERS = {
+    "autopilot/generate_config.py": ("safe_dump",),
+    "cans/pack.py": ("safe_dump",),
+    "commands/adapters.py": ("YAMLError",),
+    "commands/deploy.py": ("YAMLError",),
+    "commands/push.py": ("YAMLError",),
+    "commands/ship.py": ("YAMLError",),
+    "commands/spectrum.py": ("safe_dump",),
+    "commands/sweep.py": ("YAMLError",),
+    "migrate/common.py": ("dump",),
+    "ui/app.py": ("dump",),
+    "utils/adapter_branch.py": ("safe_dump",),
+    "utils/build_dag.py": ("YAMLError",),
+    "utils/checklist_dsl.py": ("YAMLError",),
+    "utils/compile_tools.py": ("safe_dump",),
+    "utils/expectations.py": ("YAMLError",),
+    "utils/iterative_dpo.py": ("safe_dump",),
+    "utils/local_rl.py": ("safe_dump",),
+    "utils/loop_stages.py": ("safe_dump",),
+    "utils/mix_proxy.py": ("safe_dump",),
+    "utils/onboarding.py": ("safe_dump",),
+    "utils/ra_dit_run.py": ("safe_dump",),
+    "utils/recipe_dag.py": ("YAMLError",),
+}
+
+_YAML_PACKAGES = ("yaml", "ruamel")
 
 
-def _yaml_loading_uses(source: str) -> list[tuple[int, str]]:
-    """``(line, spelling)`` for every use of a PyYAML loading function.
+def _is_yaml_package(name: object) -> bool:
+    return isinstance(name, str) and name.split(".")[0] in _YAML_PACKAGES
 
-    Sees ``yaml.safe_load(...)``, an aliased module (``import yaml as y``), a
-    name imported from the package (``from yaml import safe_load``), and a bare
-    reference that is called later (``loader = yaml.safe_load``).
+
+def _yaml_uses(source: str) -> tuple[set[str], list[tuple[int, str]]]:
+    """``(attributes, problems)`` for one module's use of a YAML package.
+
+    ``attributes`` are the ``yaml.<name>`` accesses made through a plain
+    ``import yaml`` (or ``import yaml as y``). ``problems`` is every other way
+    of reaching the package, each of which could hide a parse: a from-import, a
+    submodule import, ``ruamel``, a dynamic import by literal name, and any use
+    of the module object that is not an attribute access (``y = yaml``,
+    ``getattr(yaml, ...)``, passing it on).
     """
     tree = ast.parse(source)
-    modules: set[str] = set()
-    imported: dict[str, str] = {}
+    names: set[str] = set()
+    problems: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "yaml":
-                    modules.add(alias.asname or "yaml")
-        elif isinstance(node, ast.ImportFrom) and node.module == "yaml":
-            for alias in node.names:
-                if alias.name in _LOADING_NAMES:
-                    imported[alias.asname or alias.name] = alias.name
+                    names.add(alias.asname or "yaml")
+                elif _is_yaml_package(alias.name):
+                    problems.append((node.lineno, f"import {alias.name}"))
+        elif isinstance(node, ast.ImportFrom) and _is_yaml_package(node.module):
+            problems.append((node.lineno, f"from {node.module} import ..."))
+        elif isinstance(node, ast.Call):
+            target = node.func
+            called = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+            literal = node.args[0].value if node.args and isinstance(
+                node.args[0], ast.Constant
+            ) else None
+            if called in ("import_module", "__import__") and _is_yaml_package(literal):
+                problems.append((node.lineno, f"{called}({literal!r})"))
 
-    uses: list[tuple[int, str]] = []
+    attributes: set[str] = set()
+    through_attribute: set[int] = set()
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
-            and node.attr in _LOADING_NAMES
             and isinstance(node.value, ast.Name)
-            and node.value.id in modules
+            and node.value.id in names
         ):
-            uses.append((node.lineno, f"{node.value.id}.{node.attr}"))
-        elif isinstance(node, ast.ImportFrom) and node.module == "yaml":
-            uses.extend(
-                (node.lineno, f"from yaml import {alias.name}")
-                for alias in node.names
-                if alias.name in _LOADING_NAMES
-            )
-    return sorted(uses)
+            attributes.add(node.attr)
+            through_attribute.add(id(node.value))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in names and id(node) not in through_attribute:
+            problems.append((node.lineno, f"bare use of {node.id}"))
+    return attributes, sorted(problems)
 
 
 @pytest.mark.parametrize(
-    ("source", "spelling"),
+    ("source", "attribute"),
     [
-        ("import yaml\nx = yaml.safe_load(t)\n", "yaml.safe_load"),
-        ("import yaml\nx = yaml.load(t, Loader=yaml.SafeLoader)\n", "yaml.load"),
-        ("import yaml as y\nx = y.safe_load(t)\n", "y.safe_load"),
-        ("import yaml\nfor d in yaml.safe_load_all(t):\n    pass\n", "yaml.safe_load_all"),
-        ("import yaml\nx = yaml.full_load(t)\n", "yaml.full_load"),
-        ("import yaml\nx = yaml.unsafe_load(t)\n", "yaml.unsafe_load"),
-        ("import yaml\nx = yaml.compose(t)\n", "yaml.compose"),
-        ("def f(t):\n    import yaml\n    return yaml.safe_load(t)\n", "yaml.safe_load"),
-        ("import yaml\nloader = yaml.safe_load\nx = loader(t)\n", "yaml.safe_load"),
-        ("from yaml import safe_load\nx = safe_load(t)\n", "from yaml import safe_load"),
-        ("from yaml import safe_load as sl\nx = sl(t)\n", "from yaml import safe_load"),
+        ("import yaml\nx = yaml.safe_load(t)\n", "safe_load"),
+        ("import yaml\nx = yaml.load(t, Loader=None)\n", "load"),
+        ("import yaml as y\nx = y.safe_load(t)\n", "safe_load"),
+        ("import yaml\nfor d in yaml.safe_load_all(t):\n    pass\n", "safe_load_all"),
+        ("import yaml\nx = yaml.full_load(t)\n", "full_load"),
+        ("import yaml\nx = yaml.unsafe_load(t)\n", "unsafe_load"),
+        ("import yaml\nx = yaml.compose(t)\n", "compose"),
+        ("import yaml\nfor e in yaml.parse(t):\n    pass\n", "parse"),
+        ("import yaml\nfor e in yaml.scan(t):\n    pass\n", "scan"),
+        ("import yaml\nx = yaml.SafeLoader(t).get_single_data()\n", "SafeLoader"),
+        ("def f(t):\n    import yaml\n    return yaml.safe_load(t)\n", "safe_load"),
+        ("import yaml\nloader = yaml.safe_load\nx = loader(t)\n", "safe_load"),
     ],
 )
-def test_scan_sees_each_spelling_of_a_yaml_load(source, spelling):
-    assert [found for _, found in _yaml_loading_uses(source)] == [spelling]
+def test_scan_reports_each_parsing_attribute(source, attribute):
+    attributes, problems = _yaml_uses(source)
+    assert attributes == {attribute}
+    assert not attributes <= _NOT_PARSING
+    assert problems == []
+
+
+@pytest.mark.parametrize(
+    ("source", "problem"),
+    [
+        ("from yaml import safe_load\nx = safe_load(t)\n", "from yaml import ..."),
+        ("from yaml import safe_load as sl\nx = sl(t)\n", "from yaml import ..."),
+        ("from yaml import *\nx = safe_load(t)\n", "from yaml import ..."),
+        ("from yaml import SafeLoader\n", "from yaml import ..."),
+        ("from yaml.loader import SafeLoader\n", "from yaml.loader import ..."),
+        ("import yaml.loader\n", "import yaml.loader"),
+        ("import yaml\ny = yaml\nx = y.safe_load(t)\n", "bare use of yaml"),
+        ('import yaml\nx = getattr(yaml, "safe_load")(t)\n', "bare use of yaml"),
+        ("import yaml\nx = helper(yaml, t)\n", "bare use of yaml"),
+        ('import importlib\ny = importlib.import_module("yaml")\n', "import_module('yaml')"),
+        (
+            'from importlib import import_module\ny = import_module("yaml")\n',
+            "import_module('yaml')",
+        ),
+        ('y = __import__("yaml")\n', "__import__('yaml')"),
+        ('y = __import__("yaml.loader")\n', "__import__('yaml.loader')"),
+        ("import ruamel.yaml\n", "import ruamel.yaml"),
+        ("from ruamel.yaml import YAML\n", "from ruamel.yaml import ..."),
+        (
+            'import importlib\ny = importlib.import_module("ruamel.yaml")\n',
+            "import_module('ruamel.yaml')",
+        ),
+    ],
+)
+def test_scan_reports_each_other_way_of_reaching_a_yaml_package(source, problem):
+    assert [found for _, found in _yaml_uses(source)[1]] == [problem]
 
 
 @pytest.mark.parametrize(
     "source",
     [
         "import yaml\ntext = yaml.safe_dump(data)\n",
+        "import yaml\ntext = yaml.dump(data)\n",
         "import yaml\ntry:\n    pass\nexcept yaml.YAMLError:\n    pass\n",
-        "from yaml import YAMLError, safe_dump\n",
-        "import json\nx = json.load(fh)\n",
-        "x = config.load(t)\n",
-        '"""Uses ``yaml.safe_load`` semantics."""\n',
+        "import yaml\ntry:\n    pass\nexcept (yaml.YAMLError, OSError):\n    pass\n",
     ],
 )
-def test_scan_ignores_what_is_not_a_yaml_load(source):
-    assert _yaml_loading_uses(source) == []
+def test_scan_accepts_writing_yaml_and_catching_its_error(source):
+    attributes, problems = _yaml_uses(source)
+    assert attributes <= _NOT_PARSING
+    assert problems == []
 
 
-def test_only_the_limited_loader_calls_pyyaml_loading_functions():
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import json\nx = json.load(fh)\n",
+        "x = config.load(t)\n",
+        'overlay_yaml = "a: 1"\nsize = len(overlay_yaml.encode())\n',
+        '"""Uses ``yaml.safe_load`` semantics."""\n',
+        'y = importlib.import_module("json")\n',
+        "y = importlib.import_module(name)\n",
+    ],
+)
+def test_scan_ignores_what_is_not_a_yaml_package(source):
+    assert _yaml_uses(source) == (set(), [])
+
+
+def test_no_module_but_the_limited_loader_can_parse_yaml():
     files = sorted(SRC.rglob("*.py"))
     assert len(files) > 300, "the scan did not find the package"
-    offenders = []
-    for path in files:
-        rel = path.relative_to(SRC).as_posix()
-        uses = _yaml_loading_uses(path.read_text(encoding="utf-8"))
-        if uses and rel not in ALLOWED:
-            offenders.extend(f"{rel}:{line} {spelling}" for line, spelling in uses)
+    found: dict[str, tuple[str, ...]] = {}
+    offenders: list[str] = []
+    for file in files:
+        rel = file.relative_to(SRC).as_posix()
+        if rel == LOADER_MODULE:
+            continue
+        attributes, problems = _yaml_uses(file.read_text(encoding="utf-8"))
+        offenders.extend(f"{rel}:{line} {problem}" for line, problem in problems)
+        offenders.extend(
+            f"{rel}: yaml.{name}" for name in sorted(attributes - _NOT_PARSING)
+        )
+        if attributes:
+            found[rel] = tuple(sorted(attributes))
     assert offenders == [], (
         "read YAML with soup_cli.utils.yaml_limits.load_yaml_limited / "
         "load_yaml_file_limited instead:\n" + "\n".join(offenders)
     )
+    assert found == YAML_USERS, "YAML_USERS must list each module with the attributes it uses"
 
 
 def test_the_limited_loader_is_where_the_scan_expects_it():
-    for rel in ALLOWED:
-        assert _yaml_loading_uses((SRC / rel).read_text(encoding="utf-8")), rel
+    attributes, _ = _yaml_uses((SRC / LOADER_MODULE).read_text(encoding="utf-8"))
+    assert "SafeLoader" in attributes
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +417,7 @@ def test_every_routed_reader_has_a_case():
     importers = set()
     for path in sorted(SRC.rglob("*.py")):
         rel = path.relative_to(SRC).as_posix()
-        if rel in ALLOWED:
+        if rel == LOADER_MODULE:
             continue
         text = path.read_text(encoding="utf-8")
         if "load_yaml_limited" in text or "load_yaml_file_limited" in text:
