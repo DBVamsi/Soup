@@ -195,6 +195,8 @@ Accepted runs are recorded in [`benchmarks/gpu-test-runs.md`](benchmarks/gpu-tes
 
 > A representative sample of the suite below. Run `pytest tests/ -v` for the complete list.
 
+Name a new test file after the module or feature it covers (`test_<module>.py`), not after
+an issue number or a version. Existing test files keep their names.
 
 | File | Covers |
 |------|--------|
