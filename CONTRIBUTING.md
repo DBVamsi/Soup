@@ -546,12 +546,13 @@ GitHub Actions runs on every push and PR:
   that pin.
 - **benchmark** (`.github/workflows/codspeed.yml`, #1065): a CodSpeed
   regression benchmark, its own workflow and not part of the matrix above.
-  The job is **skipped** everywhere until the repository variable
-  `CODSPEED_ENABLED` is `true` (set once the CodSpeed GitHub App is installed),
-  and always on fork PRs — GitHub does not grant a `pull_request` run from a
-  fork an OIDC token, so the upload could not authenticate. Since most
-  contributions here are fork PRs, expect "skipped" on yours; it is not a
-  required check and blocks nothing.
+  It is **off**: the workflow starts only by manual dispatch, so it adds no
+  check to your pull request. Turning it on takes the CodSpeed GitHub App, the
+  repository variable `CODSPEED_ENABLED` set to `true`, and the `push` /
+  `pull_request` triggers restored in the workflow file (its header is the
+  checklist). Even then it never runs on a fork PR — GitHub does not grant a
+  `pull_request` run from a fork an OIDC token, so the upload could not
+  authenticate. It is not a required check and blocks nothing.
 
 **Pull requests run a quick subset first.** A push to a pull request runs `lint`
 and the tests on Ubuntu / Python 3.12 only. The required cells (Ubuntu on Python
