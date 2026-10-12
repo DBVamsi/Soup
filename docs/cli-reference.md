@@ -2332,7 +2332,7 @@ Usage: `soup export [OPTIONS]`
 | Name | Type | Default | Required | Help |
 |---|---|---|---|---|
 | `--model`, `-m` | text |  | yes | Path to model directory (full model or LoRA adapter) |
-| `--format`, `-f` | text | `gguf` |  | Export format: gguf, onnx, tensorrt, awq, gptq, bitnet, tq1_0 (awq and gptq are deprecated and will be removed in the next release) |
+| `--format`, `-f` | text | `gguf` |  | Export format: gguf, onnx, tensorrt, awq, gptq, bitnet, tq1_0 (awq and gptq are deprecated and will be removed in Soup v0.77) |
 | `--quant`, `-q` | text | `q4_k_m` |  | Quantization type: q4_0, q4_k_m, q5_k_m, q8_0, f16, f32 |
 | `--output`, `-o` | text |  |  | Output file path. Default: &lt;model-name>.&lt;quant>.gguf |
 | `--base`, `-b` | text |  |  | Base model ID (for LoRA adapters). Auto-detected if not set. |
@@ -3049,7 +3049,7 @@ Usage: `soup quantize [OPTIONS] MODEL_PATH`
 | Name | Type | Default | Required | Help |
 |---|---|---|---|---|
 | `MODEL_PATH` | text |  | yes | Source checkpoint (safetensors directory or single .safetensors). |
-| `--to` | text | `gguf` |  | Target format: gguf \| gptq \| awq \| onnx \| tensorrt (awq and gptq are deprecated and will be removed in the next release). |
+| `--to` | text | `gguf` |  | Target format: gguf \| gptq \| awq \| onnx \| tensorrt (awq and gptq are deprecated and will be removed in Soup v0.77). |
 | `--bits` | integer | `4` |  | Quantization bits (1-16; respected by gguf/gptq/awq). |
 | `--output`, `-o` | text |  |  | Destination directory (default: &lt;model_path>-&lt;to>). |
 
@@ -3301,8 +3301,8 @@ Usage: `soup rewind [OPTIONS] [RUN_ID]`
 |---|---|---|---|---|
 | `RUN_ID` | text |  |  | Run ID (or prefix). Defaults to the most recent run. |
 | `--step` | integer |  |  | Detail this step instead of the worst spike. |
-| `--top` | integer | `10` |  | How many rows to list for the detailed step. |
-| `--json` | path |  |  | Write the spikes and the ranked rows to this path as JSON. |
+| `--top` | integer, at least 1 | `10` |  | How many rows to list for the detailed step (at least 1). |
+| `--json` | text |  |  | Write the spikes and the ranked rows to this path as JSON (must stay under the current directory). |
 | `--no-preview` | flag | off |  | Skip the row previews (does not load the dataset). |
 
 ## `soup runs`
