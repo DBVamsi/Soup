@@ -6,10 +6,13 @@ import pytest
 import typer
 
 from soup_cli.utils.argv_redaction import (
+    NOT_SECRET_OPTIONS,
     REDACTED,
+    SECRET_OPTIONS,
+    _long_names,
     all_secret_option_strings,
+    is_secret_name,
     iter_commands,
-    mask_args_by_name,
     mask_secret_args,
     resolve_command,
     secret_option_strings,
@@ -165,7 +168,7 @@ def test_a_group_is_masked_with_every_option_of_the_app(cli):
 
 
 # ---------------------------------------------------------------------------
-# When the tree yields no credential option, the names typed decide
+# The names typed are masked by the same rule, whatever the tree yields
 # ---------------------------------------------------------------------------
 
 
@@ -209,10 +212,12 @@ def test_an_empty_option_set_masks_by_the_names_on_the_command_line(cli, monkeyp
             ("--api-key", REDACTED, "--auth-token", REDACTED),
         ),
         (["--api-key"], ("--api-key",)),
+        (["--slack-url", "https://example.invalid/hook/V"], ("--slack-url", REDACTED)),
+        (["--discord-url=https://example.invalid/hook/V"], (f"--discord-url={REDACTED}",)),
     ],
 )
 def test_names_that_look_like_a_credential_have_their_value_masked(args, expected):
-    assert mask_args_by_name(args) == expected
+    assert mask_secret_args(args, frozenset()) == expected
 
 
 @pytest.mark.parametrize(
@@ -221,6 +226,8 @@ def test_names_that_look_like_a_credential_have_their_value_masked(args, expecte
         ["serve", "--model", "m", "--port", "8000"],
         ["--max-tokens", "64"],
         ["--max-new-tokens=64"],
+        ["--min-tokens", "5"],
+        ["--base-url", "https://example.invalid/v1"],
         ["--tokenizer", "org/model"],
         ["--public-key", "key.pem"],
         ["--special-token", "<|im_end|>"],
@@ -231,4 +238,105 @@ def test_names_that_look_like_a_credential_have_their_value_masked(args, expecte
     ],
 )
 def test_other_arguments_are_kept_as_typed(args):
-    assert mask_args_by_name(args) == tuple(args)
+    assert mask_secret_args(args, frozenset()) == tuple(args)
+
+
+def test_names_and_tree_options_are_masked_together():
+    """A declared short alias and an undeclared long name in one command line."""
+    args = ["-t", "V1", "--api-key", "V2", "-x", "kept", "--port", "1"]
+    assert mask_secret_args(args, frozenset({"--token", "-t"})) == (
+        "-t",
+        REDACTED,
+        "--api-key",
+        REDACTED,
+        "-x",
+        "kept",
+        "--port",
+        "1",
+    )
+
+
+def test_a_single_dash_option_of_several_letters_is_masked_as_declared():
+    """Not a long name and not a one-letter alias: only the tree can name it."""
+    assert mask_secret_args(["-tok", "V", "x"], frozenset({"-tok"})) == ("-tok", REDACTED, "x")
+
+
+# ---------------------------------------------------------------------------
+# A tree that can only partly be read
+# ---------------------------------------------------------------------------
+
+
+class _Unreadable:
+    """A parameter that exposes none of the attributes the walk reads."""
+
+
+@pytest.fixture
+def partly_readable(cli, monkeypatch):
+    """`push` declares its credential option; nothing can be read from `serve`."""
+    push = _Command("push", [_Option("--token", "-t"), _Option("--repo")])
+    serve = _Command("serve", [_Unreadable(), _Unreadable()])
+    root = _Group("soup", [push, serve])
+    monkeypatch.setattr(typer.main, "get_command", lambda app: root)
+    assert all_secret_option_strings(root) == {"--token", "-t"}
+    return cli
+
+
+def test_an_option_the_tree_did_not_yield_is_still_masked(partly_readable):
+    args = ["--model", "m", "--api-key", "VALUE-ONE", "--tool-auth-token=VALUE-TWO", "--port", "1"]
+    assert partly_readable._mask_audit_args("serve", args) == (
+        "--model",
+        "m",
+        "--api-key",
+        REDACTED,
+        f"--tool-auth-token={REDACTED}",
+        "--port",
+        "1",
+    )
+
+
+def test_a_short_alias_the_tree_did_yield_is_masked(partly_readable):
+    assert partly_readable._mask_audit_args("push", ["--repo", "u/m", "-t", "VALUE"]) == (
+        "--repo",
+        "u/m",
+        "-t",
+        REDACTED,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The two lists and the real options agree
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_urls_are_credential_options_of_the_real_tree(cli):
+    assert SECRET_OPTIONS == {"--slack-url", "--discord-url"}
+    assert SECRET_OPTIONS <= all_secret_option_strings(typer.main.get_command(cli.app))
+
+
+def test_a_webhook_url_is_masked_for_a_real_command(cli):
+    args = ["--slack-url", "https://example.invalid/hook/VALUE", "--discord-url=VALUE-TWO"]
+    assert cli._mask_audit_args("train", args) == (
+        "--slack-url",
+        REDACTED,
+        f"--discord-url={REDACTED}",
+    )
+
+
+def test_a_length_threshold_is_not_a_credential_option(cli):
+    assert "--min-tokens" in NOT_SECRET_OPTIONS
+    assert "--min-tokens" not in all_secret_option_strings(typer.main.get_command(cli.app))
+    assert cli._mask_audit_args("data", ["clean", "--min-tokens", "5"]) == (
+        "clean",
+        "--min-tokens",
+        "5",
+    )
+
+
+def test_no_real_switch_has_a_name_the_rule_would_mask(cli):
+    """A switch takes no value, so masking by its name would hide the next argument."""
+    unlisted = set()
+    for command in iter_commands(typer.main.get_command(cli.app)):
+        for param in getattr(command, "params", None) or ():
+            if getattr(param, "is_flag", False) or getattr(param, "count", False):
+                unlisted.update(name for name in _long_names(param) if is_secret_name(name))
+    assert unlisted == set(), "list each in NOT_SECRET_OPTIONS"

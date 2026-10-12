@@ -828,13 +828,12 @@ def _mask_audit_args(command: str, args: list[str]) -> tuple[str, ...]:
     something else elsewhere. If the command does not resolve to a leaf,
     every credential option string of the app is masked. A resolution
     failure falls back to that widest set, never to the unmasked args.
-    If the command tree yields no credential option at all, masking goes
-    by the option names typed on the command line.
+    Whatever the tree yields, a long option whose name looks like a
+    credential is masked by that name as well.
     """
     global _ALL_SECRET_OPTION_STRINGS
     from soup_cli.utils.argv_redaction import (
         all_secret_option_strings,
-        mask_args_by_name,
         mask_secret_args,
         resolve_command,
         secret_option_strings,
@@ -845,8 +844,6 @@ def _mask_audit_args(command: str, args: list[str]) -> tuple[str, ...]:
     if _ALL_SECRET_OPTION_STRINGS is None:
         _ALL_SECRET_OPTION_STRINGS = all_secret_option_strings(root)
     everything = _ALL_SECRET_OPTION_STRINGS
-    if not everything:
-        return mask_args_by_name(args)
     try:
         resolved = resolve_command(root, [command, *args])
         if subcommands(resolved) is not None:
