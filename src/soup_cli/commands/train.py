@@ -871,9 +871,11 @@ def train(
         console.print(f"[red]Invalid distributed launch:[/] {markup_escape(message)}")
         raise typer.Exit(1) from exc
 
+    from soup_cli.utils.terminal import for_terminal
+
     config_path = Path(config)
     if not config_path.exists():
-        console.print(f"[red]Config not found: {config_path}[/]")
+        console.print(f"[red]Config not found: {for_terminal(config_path)}[/]")
         console.print("Run [bold]soup init[/] to create one.")
         raise typer.Exit(1)
 
@@ -904,7 +906,8 @@ def train(
                 config_path, schedule, trust_remote_code=trust_remote_code,
             )
         except (SweepTooShortError, LrSweepUnavailableError) as exc:
-            console.print(f"[red]{markup_escape(str(exc))}[/]")
+            # The refusal can quote the config path and text from the file.
+            console.print(f"[red]{for_terminal(str(exc))}[/]")
             raise typer.Exit(1) from exc
         try:
             save_lr_finder_report(lrs, losses_for_report, find_lr_output)
@@ -915,7 +918,7 @@ def train(
         raise typer.Exit(0)
 
     # Load & validate config
-    console.print(f"[dim]Loading config from {config_path}...[/]")
+    console.print(f"[dim]Loading config from {for_terminal(config_path)}...[/]")
     cfg = load_config(
         config_path,
         training_overrides=(

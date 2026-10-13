@@ -1814,10 +1814,14 @@ def audit(
                 )
             )
     except yaml.YAMLError as exc:
-        console.print(f"[red]Could not parse {config}: {exc}[/]")
+        console.print(
+            f"[red]Could not parse {for_terminal(config)}: {for_terminal(str(exc))}[/]"
+        )
         raise typer.Exit(1) from exc
     except (SystemExit, Exception) as exc:  # schema rejection prints its own
-        console.print(f"[red]Could not load {config}: {exc}[/]")
+        console.print(
+            f"[red]Could not load {for_terminal(config)}: {for_terminal(str(exc))}[/]"
+        )
         raise typer.Exit(1) from exc
     cfg = soup_config.model_dump()
 

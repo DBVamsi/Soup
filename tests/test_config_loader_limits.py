@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 
@@ -280,6 +281,19 @@ class TestConfigFile:
         # Rich wraps the long word, so count it without the breaks.
         assert len(detail.replace(" ", "")) <= loader._MAX_DETAIL_CHARS + 3
         assert len(output) < 300
+
+    @pytest.mark.parametrize(
+        ("scalar", "name"),
+        [("!!bool foo", "bool"), ("!!timestamp foo", "timestamp"), ('!!int ""', "int")],
+    )
+    def test_text_an_explicit_tag_cannot_convert_is_one_line_too(
+        self, in_tmp, capsys, scalar, name
+    ):
+        (in_tmp / "soup.yaml").write_text(_VALID + f"extra: {scalar}\n", encoding="utf-8")
+        assert _refused(capsys) == (
+            "Config file soup.yaml is not valid YAML: cannot build this value: "
+            f"not a valid {name} (line 12, column 8)"
+        )
 
     def test_a_long_detail_ends_with_an_ellipsis_and_a_short_one_does_not(self):
         assert loader._MAX_DETAIL_CHARS == 200
@@ -595,3 +609,63 @@ def test_mcp_reports_the_refusal_as_an_invalid_config(in_tmp, limit):
     (in_tmp / "soup.yaml").write_bytes(make_text().encode())
     with pytest.raises(registry.McpToolError, match=r"invalid config \(YamlLimitError\)"):
         registry._load_config_under_cwd("soup.yaml")
+
+
+# ---------------------------------------------------------------------------
+# A path with control characters reaches the terminal without them
+# ---------------------------------------------------------------------------
+
+#: CSI (U+009B) and DEL fit in a file name everywhere; ESC does not on Windows,
+#: where the file system refuses every character below U+0020.
+_CONTROLS = "\x9b\x7f" + ("" if os.name == "nt" else "\x1b")
+_ODD_NAME = "run" + "31m".join(_CONTROLS) + "Z.yaml"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["train", "--config", _ODD_NAME, "--find-lr"],
+        ["train", "--config", _ODD_NAME, "--dry-run"],
+        ["adapters", "audit", "adapter", "--config", _ODD_NAME],
+        ["cost", "--config", _ODD_NAME],
+    ],
+    ids=["train-find-lr", "train", "adapters-audit", "cost"],
+)
+def test_a_refusal_that_quotes_an_odd_path_carries_no_control_character(in_tmp, argv):
+    from soup_cli.cli import app
+
+    (in_tmp / "adapter").mkdir()
+    (in_tmp / "adapter" / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (in_tmp / _ODD_NAME).write_text(_config_nested(MAX_YAML_NESTING + 1), encoding="utf-8")
+
+    result = CliRunner().invoke(app, argv)
+
+    # Rich may colour the line; those codes are its own, so they are set aside first.
+    shown = _ANSI_RE.sub("", result.output)
+    assert result.exit_code == 1, (result.output, repr(result.exception))
+    assert _NESTING_MESSAGE in _plain(result.output), result.output
+    assert not [char for char in shown if char in "\x1b\x7f\x9b"], repr(shown)
+
+
+def test_a_missing_config_with_an_odd_path_is_named_without_control_characters(in_tmp):
+    from soup_cli.cli import app
+
+    result = CliRunner().invoke(app, ["train", "--config", _ODD_NAME, "--dry-run"])
+    shown = _ANSI_RE.sub("", result.output)
+    assert result.exit_code == 1, (result.output, repr(result.exception))
+    assert "Config not found: run" in _plain(result.output), result.output
+    assert not [char for char in shown if char in "\x1b\x7f\x9b"], repr(shown)
+
+
+def test_adapters_audit_shows_a_syntax_error_as_written(in_tmp):
+    """The quoted line holds a bracket; it is text, not markup."""
+    from soup_cli.cli import app
+
+    (in_tmp / "adapter").mkdir()
+    (in_tmp / "adapter" / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (in_tmp / "soup.yaml").write_text("base: m\ndata: [unclosed\n", encoding="utf-8")
+    result = CliRunner().invoke(app, ["adapters", "audit", "adapter", "--config", "soup.yaml"])
+    output = _plain(result.output)
+    assert result.exit_code == 1, (result.output, repr(result.exception))
+    assert "Could not parse soup.yaml: while parsing a flow sequence" in output, output
+    assert "data: [unclosed" in output, output
