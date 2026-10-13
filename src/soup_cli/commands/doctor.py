@@ -375,9 +375,8 @@ def _check_config_support(config_path: str) -> None:
 
     try:
         from soup_cli.config.loader import load_config
-        from soup_cli.utils.terminal import for_terminal
 
-        cfg = load_config(config_path, raise_unreadable=True)
+        cfg = load_config(config_path)
     except FileNotFoundError as exc:
         console.print(f"\n[red]Config not found:[/] {config_path}")
         # Non-zero deliberately: this leg is meant to be gate-able in CI, and a
@@ -393,10 +392,7 @@ def _check_config_support(config_path: str) -> None:
         console.print("\n[red]Config could not be loaded (see above).[/]")
         raise typer.Exit(2) from exc
     except Exception as exc:  # invalid YAML, unreadable file
-        # The reason quotes the file: escape it like any file-derived text.
-        console.print(
-            f"\n[red]Config could not be loaded:[/] {for_terminal(str(exc))}"
-        )
+        console.print(f"\n[red]Config could not be loaded:[/] {exc}")
         raise typer.Exit(2) from exc
 
     backend = getattr(cfg, "backend", DEFAULT_BACKEND)

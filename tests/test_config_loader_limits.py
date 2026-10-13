@@ -359,40 +359,39 @@ class TestConfigFile:
             load_config("soup.yaml", raise_unreadable=True)
         assert "Config validation error" in _plain(capsys.readouterr().out)
 
+    def test_find_lr_words_an_unreadable_config_in_its_own_sentence(self, in_tmp):
+        """It quotes the reason itself, so the loader hands the exception over."""
+        from soup_cli.cli import app
+
+        (in_tmp / "soup.yaml").write_text("base: m\ndata: [unclosed\n", encoding="utf-8")
+        result = CliRunner().invoke(app, ["train", "--config", "soup.yaml", "--find-lr"])
+        output = _plain(result.output)
+        assert result.exit_code == 1, (result.output, repr(result.exception))
+        assert "--find-lr: config load failed (while parsing a flow sequence" in output, output
+        assert "data: [unclosed" in output, output
+        assert "is not valid YAML" not in output, output
+
     @pytest.mark.parametrize(
-        ("argv", "sentence", "code"),
+        ("argv", "code", "also"),
         [
-            (
-                ["train", "--config", "soup.yaml", "--find-lr"],
-                "--find-lr: config load failed (while parsing a flow sequence",
-                1,
-            ),
-            (
-                ["bench", "train", "--config", "soup.yaml", "--steps", "4", "--warmup", "1"],
-                "Config invalid: while parsing a flow sequence",
-                1,
-            ),
-            (
-                ["doctor", "--config", "soup.yaml"],
-                "Config could not be loaded: while parsing a flow sequence",
-                2,
-            ),
+            (["bench", "train", "--config", "soup.yaml", "--steps", "4", "--warmup", "1"], 1, ""),
+            (["doctor", "--config", "soup.yaml"], 2, "Config could not be loaded (see above)."),
         ],
-        ids=["train-find-lr", "bench-train", "doctor"],
+        ids=["bench-train", "doctor"],
     )
-    def test_a_command_with_its_own_sentence_for_an_unreadable_config_keeps_it(
-        self, in_tmp, argv, sentence, code
+    def test_a_command_that_calls_the_loader_plainly_shows_its_line_and_keeps_its_exit_code(
+        self, in_tmp, argv, code, also
     ):
-        """These three quote the reason themselves, so the loader hands it over."""
         from soup_cli.cli import app
 
         (in_tmp / "soup.yaml").write_text("base: m\ndata: [unclosed\n", encoding="utf-8")
         result = CliRunner().invoke(app, argv)
         output = _plain(result.output)
         assert result.exit_code == code, (result.output, repr(result.exception))
-        assert sentence in output, output
-        assert "data: [unclosed" in output, output
-        assert "is not valid YAML" not in output, output
+        assert "Config file soup.yaml is not valid YAML: expected ',' or ']'" in output, output
+        assert "(line 3, column 1)" in output, output
+        assert also in output, output
+        assert "Traceback" not in output
 
     def test_training_overrides_still_reach_the_config(self, in_tmp):
         (in_tmp / "soup.yaml").write_text(_VALID, encoding="utf-8")
