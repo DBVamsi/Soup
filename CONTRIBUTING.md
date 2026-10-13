@@ -555,12 +555,13 @@ GitHub Actions runs on every push and PR:
   that pin.
 - **benchmark** (`.github/workflows/codspeed.yml`, #1065): a CodSpeed
   regression benchmark, its own workflow and not part of the matrix above.
-  The job is **skipped** everywhere until the repository variable
-  `CODSPEED_ENABLED` is `true` (set once the CodSpeed GitHub App is installed),
-  and always on fork PRs — GitHub does not grant a `pull_request` run from a
-  fork an OIDC token, so the upload could not authenticate. Since most
-  contributions here are fork PRs, expect "skipped" on yours; it is not a
-  required check and blocks nothing.
+  It is **off**: the workflow starts only by manual dispatch, so it adds no
+  check to your pull request. Turning it on takes the CodSpeed GitHub App, the
+  repository variable `CODSPEED_ENABLED` set to `true`, and the `push` /
+  `pull_request` triggers restored in the workflow file (its header is the
+  checklist). Even then it never runs on a fork PR — GitHub does not grant a
+  `pull_request` run from a fork an OIDC token, so the upload could not
+  authenticate. It is not a required check and blocks nothing.
 
 **Pull requests run a quick subset first.** A push to a pull request runs `lint`
 and the tests on Ubuntu / Python 3.12 only. The required cells (Ubuntu on Python
@@ -576,6 +577,20 @@ branch runs every cell.
 **A draft pull request runs no CI.** Nothing starts while a pull request is a
 draft, whatever is pushed to it. Mark it ready for review and the quick set
 starts on its current head.
+
+**Pull-request CI installs a pinned upstream stack.** On a pull request and on a
+push to `main`, every job that installs torch or transformers (the test cells,
+the smoke jobs, `Recipe Validation` and `recipe attach`) takes them and the
+packages they resolve with at the exact versions in
+`.github/constraints/pinned-upstream.txt`, so a release upstream cannot turn
+every open pull request red at once. The one exception is `transformers-floor`,
+which installs its own exact floor, and packages outside that file (numpy,
+pydantic, mlx, torchao, ...) still resolve the newest on every run. The nightly
+run on `main` installs with no constraints, and that is where a new release of
+a pinned package shows first. If your change moves a
+bound in `pyproject.toml` past one of those pins, move the pin in the same pull
+request: `tests/test_ci_pinned_upstream.py` names the pin, and the header of the
+constraints file says how to pick the new version.
 
 **CI runs the tests in parallel.** Every `test (...)` cell runs the suite with
 `pytest-xdist`, one test file per worker process (`-n logical --dist loadfile`).
