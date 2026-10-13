@@ -311,8 +311,8 @@ def serve(
         "--tool-auth-token",
         help=(
             "Require 'Authorization: Bearer <token>' on the code-exec tool "
-            "endpoints (/v1/tools/python, /v1/tools/web_search). Strongly "
-            "recommended whenever --host is not loopback, since those "
+            "endpoints (/v1/tools/python, /v1/tools/bash, /v1/tools/web_search). "
+            "Strongly recommended whenever --host is not loopback, since those "
             "endpoints run caller-supplied Python in a best-effort sandbox."
         ),
     ),
@@ -1723,7 +1723,8 @@ def _create_app(
 
     Args:
         auth_token: optional Bearer-token gate for the v0.53.7 tool
-            endpoints (``/v1/tools/python`` + ``/v1/tools/web_search``).
+            endpoints (``/v1/tools/python``, ``/v1/tools/bash`` and
+            ``/v1/tools/web_search``).
             When ``None`` (default), endpoints inherit the server's
             loopback-only CORS trust boundary. When set, callers must
             supply ``Authorization: Bearer <token>``.
