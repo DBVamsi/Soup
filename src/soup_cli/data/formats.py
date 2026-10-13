@@ -412,11 +412,12 @@ def _as_messages(value: object, field: str) -> list[dict]:
     """``value`` as a non-empty list of well-formed messages, or raise.
 
     One message is read as a list of one. ``content`` is a string, or a list of
-    content blocks (a multimodal turn, prepared by trl), or null on a turn that
-    calls a tool: one with a ``tool_calls`` list, which exports also write
-    empty, or the legacy ``function_call``. Those trained before and still do.
-    A JSON object as content (a tool result that was not serialised) never
-    loaded beside string contents: Arrow needs one type per column.
+    content blocks (a multimodal turn, prepared by trl), or null or absent: a
+    turn with no text is accepted on any message, with a ``tool_calls`` or
+    ``function_call`` key beside it or without one. Rows with such a turn
+    trained before and still do. Any other type is refused. A JSON object as
+    content (a tool result that was not serialised) never loaded beside string
+    contents: Arrow needs one type per column.
     """
     if isinstance(value, dict):
         value = [value]
@@ -437,17 +438,10 @@ def _as_messages(value: object, field: str) -> list[dict]:
         if not isinstance(role, str) or not role:
             raise TypeError(f"{where}.role must be a non-empty string")
         content = message.get("content")
-        if isinstance(content, (str, list)):
-            continue
-        calls_a_tool = (
-            message.get("tool_calls") is not None or message.get("function_call") is not None
-        )
-        if content is None and calls_a_tool:
+        if content is None or isinstance(content, (str, list)):
             continue
         hint = ""
-        if content is None:
-            hint = " (a turn without text needs tool_calls or function_call)"
-        elif isinstance(content, dict):
+        if isinstance(content, dict):
             hint = " (write a JSON tool result as a JSON string)"
         raise TypeError(
             f"{where}.content must be a string or a list of content blocks, "

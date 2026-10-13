@@ -76,7 +76,21 @@ FUNCTION_CALL = {
 NO_CALLS = {"role": "assistant", "content": None, "tool_calls": []}
 TOOL_RESULT = {"role": "tool", "content": '{"sum": 4}'}
 TOOL_RESULT_OBJECT = {"role": "tool", "content": {"sum": 4}}
-_NO_TEXT = " (a turn without text needs tool_calls or function_call)"
+#: A turn with no text, whatever else it carries. Data that trained before is not
+#: refused: a null ``content`` and a missing ``content`` key both loaded and trained
+#: (``dpo``, ``ipo``, ``bco``, ``kto``, ``orpo``), with a tool key beside them or
+#: without one, and so they still convert.
+NULL_CONTENT = {"role": "assistant", "content": None}
+NO_CONTENT_KEY = {"role": "assistant"}
+NULL_FUNCTION_CALL = {"role": "assistant", "content": None, "function_call": None}
+NULL_TOOL_CALLS = {"role": "assistant", "content": None, "tool_calls": None}
+_TEXTLESS_TURNS = {
+    "null content": NULL_CONTENT,
+    "no content key": NO_CONTENT_KEY,
+    "null content and a null function_call": NULL_FUNCTION_CALL,
+    "null content and a null tool_calls": NULL_TOOL_CALLS,
+}
+_DICT_HINT = " (write a JSON tool result as a JSON string)"
 
 
 def _layout(row: dict, fields: tuple[str, ...]) -> str:
@@ -289,6 +303,59 @@ _DPO_ACCEPTED = {
     ),
 }
 
+# A turn with no text converts wherever it stands, and is handed on as written.
+for _label, _turn_without_text in _TEXTLESS_TURNS.items():
+    _DPO_ACCEPTED[f"{_label}: in the prompt"] = (
+        {"prompt": [USER, _turn_without_text, USER2], "chosen": [GOOD2], "rejected": [BAD2]},
+        {"prompt": [USER, _turn_without_text, USER2], "chosen": [GOOD2], "rejected": [BAD2]},
+    )
+    _DPO_ACCEPTED[f"{_label}: in chosen"] = (
+        {"prompt": [USER], "chosen": [_turn_without_text], "rejected": [BAD]},
+        {"prompt": [USER], "chosen": [_turn_without_text], "rejected": [BAD]},
+    )
+    _DPO_ACCEPTED[f"{_label}: in rejected"] = (
+        {"prompt": [USER], "chosen": [GOOD], "rejected": [_turn_without_text]},
+        {"prompt": [USER], "chosen": [GOOD], "rejected": [_turn_without_text]},
+    )
+    _DPO_ACCEPTED[f"{_label}: in both answers"] = (
+        {"prompt": Q, "chosen": [USER, _turn_without_text], "rejected": [USER, _turn_without_text]},
+        {"prompt": [USER], "chosen": [_turn_without_text], "rejected": [_turn_without_text]},
+    )
+    _DPO_ACCEPTED[f"{_label}: in the bundled layout, after the user turn"] = (
+        {"prompt": Q, "chosen": [USER, _turn_without_text], "rejected": [USER, BAD]},
+        {"prompt": [USER], "chosen": [_turn_without_text], "rejected": [BAD]},
+    )
+    _DPO_ACCEPTED[f"{_label}: in a shared leading turn"] = (
+        {
+            "prompt": Q,
+            "chosen": [USER, _turn_without_text, USER2, GOOD2],
+            "rejected": [USER, _turn_without_text, USER2, BAD2],
+        },
+        {"prompt": [USER, _turn_without_text, USER2], "chosen": [GOOD2], "rejected": [BAD2]},
+    )
+    _DPO_ACCEPTED[f"{_label}: in the messages that carry the prompt"] = (
+        {"messages": [USER, _turn_without_text, USER2], "chosen": [GOOD2], "rejected": [BAD2]},
+        {"prompt": [USER, _turn_without_text, USER2], "chosen": [GOOD2], "rejected": [BAD2]},
+    )
+# An empty string is text, however short: it is not the null that a missing text is.
+_EMPTY_TEXT = {"role": "assistant", "content": ""}
+_DPO_ACCEPTED["an answer whose content is an empty string"] = (
+    {"prompt": [USER], "chosen": [_EMPTY_TEXT], "rejected": [BAD]},
+    {"prompt": [USER], "chosen": [_EMPTY_TEXT], "rejected": [BAD]},
+)
+
+# No role is special: the turn with no text can be a user, system or tool turn.
+for _role in ("user", "system", "tool"):
+    _DPO_ACCEPTED[f"a {_role} turn without a content key"] = (
+        {"prompt": [{"role": _role}], "chosen": [GOOD], "rejected": [BAD]},
+        {"prompt": [{"role": _role}], "chosen": [GOOD], "rejected": [BAD]},
+    )
+    _DPO_ACCEPTED[f"a {_role} turn with null content"] = (
+        {"prompt": [{"role": _role, "content": None}], "chosen": [GOOD], "rejected": [BAD]},
+        {"prompt": [{"role": _role, "content": None}], "chosen": [GOOD], "rejected": [BAD]},
+    )
+del _label, _turn_without_text, _role
+
 
 class TestDpoSpellingsThatConvert:
     @pytest.mark.parametrize("name", list(_DPO_ACCEPTED))
@@ -428,30 +495,10 @@ _DPO_REFUSED = {
         {"prompt": Q, "chosen": {"text": "4"}, "rejected": BAD},
         "dpo.chosen[0].role must be a non-empty string",
     ),
-    "a message's content is null": (
-        {
-            "prompt": Q,
-            "chosen": [USER, {"role": "assistant", "content": None}],
-            "rejected": [USER, BAD],
-        },
-        "dpo.chosen[1].content must be a string or a list of content blocks, got NoneType"
-        + _NO_TEXT,
-    ),
-    "a message has no content": (
-        {"prompt": [{"role": "user"}], "chosen": [GOOD], "rejected": [BAD]},
-        "dpo.prompt[0].content must be a string or a list of content blocks, got NoneType"
-        + _NO_TEXT,
-    ),
-    # A null ``tool_calls`` is no call (Arrow writes the key on every turn).
-    "a message's content and its tool_calls are both null": (
-        {
-            "prompt": [USER],
-            "chosen": [{"role": "assistant", "content": None, "tool_calls": None}],
-            "rejected": [BAD],
-        },
-        "dpo.chosen[0].content must be a string or a list of content blocks, got NoneType"
-        + _NO_TEXT,
-    ),
+    # A null or missing ``content`` is NOT refused, whatever tool keys sit beside
+    # it (see ``_TEXTLESS_TURNS``): that data trained before. What is refused is
+    # a content of another type, which never loaded.
+    #
     # Never loaded: beside string contents Arrow refuses it ("cannot mix struct
     # and non-struct, non-null values"), after the model has loaded.
     "a tool result that is a JSON object": (
@@ -460,8 +507,8 @@ _DPO_REFUSED = {
             "chosen": [USER, TOOL_CALL, TOOL_RESULT_OBJECT, GOOD],
             "rejected": [USER, TOOL_CALL, TOOL_RESULT_OBJECT, BAD],
         },
-        "dpo.chosen[2].content must be a string or a list of content blocks, got dict "
-        "(write a JSON tool result as a JSON string)",
+        "dpo.chosen[2].content must be a string or a list of content blocks, got dict"
+        + _DICT_HINT,
     ),
     "a message's content is a number": (
         {
@@ -494,6 +541,30 @@ class TestDpoSpellingsThatAreRefused:
     def test_the_plain_entry_point_drops_it_too(self, name):
         row, _ = _DPO_REFUSED[name]
         assert format_to_messages(row, "dpo") is None
+
+    @pytest.mark.parametrize(
+        "content, reason_ends",
+        [
+            (4, "got int"),
+            (1.5, "got float"),
+            (True, "got bool"),
+            ({"sum": 4}, "got dict" + _DICT_HINT),
+        ],
+    )
+    def test_only_an_object_gets_the_tool_result_hint(self, content, reason_ends):
+        """A number or a boolean is told its type and nothing else; an object is
+        told what to write instead. A null content is not in this list at all."""
+        row = {
+            "prompt": [USER],
+            "chosen": [{"role": "assistant", "content": content}],
+            "rejected": [BAD],
+        }
+        converted, reason = format_to_messages_with_reason(row, "dpo")
+        assert converted is None
+        assert reason == (
+            "dpo.chosen[0].content must be a string or a list of content blocks, "
+            + reason_ends
+        )
 
     def test_the_two_conversations_that_are_one_question_have_no_answer(self):
         """Identical conversations convert when they end on an answer (above);
@@ -564,6 +635,39 @@ _KTO_ACCEPTED = {
     ),
 }
 
+# A turn with no text converts wherever it stands, and is handed on as written.
+for _label, _turn_without_text in _TEXTLESS_TURNS.items():
+    _KTO_ACCEPTED[f"{_label}: the completion, explicit prompt"] = (
+        {"prompt": [USER], "completion": [_turn_without_text], "label": True},
+        {"prompt": [USER], "completion": [_turn_without_text], "label": True},
+    )
+    _KTO_ACCEPTED[f"{_label}: the completion, string prompt"] = (
+        {"prompt": Q, "completion": [_turn_without_text], "label": False},
+        {"prompt": [ASKED], "completion": [_turn_without_text], "label": False},
+    )
+    _KTO_ACCEPTED[f"{_label}: the completion, after the prompt it repeats"] = (
+        {"prompt": Q, "completion": [USER, _turn_without_text], "label": True},
+        {"prompt": [USER], "completion": [_turn_without_text], "label": True},
+    )
+    _KTO_ACCEPTED[f"{_label}: one message as the completion"] = (
+        {"prompt": [USER], "completion": _turn_without_text, "label": 0},
+        {"prompt": [USER], "completion": [_turn_without_text], "label": False},
+    )
+    _KTO_ACCEPTED[f"{_label}: in the prompt"] = (
+        {"prompt": [USER, _turn_without_text, USER2], "completion": [GOOD2], "label": True},
+        {"prompt": [USER, _turn_without_text, USER2], "completion": [GOOD2], "label": True},
+    )
+_KTO_ACCEPTED["a completion whose content is an empty string"] = (
+    {"prompt": [USER], "completion": [_EMPTY_TEXT], "label": True},
+    {"prompt": [USER], "completion": [_EMPTY_TEXT], "label": True},
+)
+for _role in ("user", "system", "tool"):
+    _KTO_ACCEPTED[f"a {_role} turn without a content key"] = (
+        {"prompt": [{"role": _role}], "completion": [GOOD], "label": True},
+        {"prompt": [{"role": _role}], "completion": [GOOD], "label": True},
+    )
+del _label, _turn_without_text, _role
+
 _KTO_REFUSED = {
     "no prompt": (
         {"completion": "4", "label": True},
@@ -589,9 +693,16 @@ _KTO_REFUSED = {
         {"prompt": 7, "completion": "4", "label": True},
         "kto.prompt must be a string, a message or a list of messages, got int",
     ),
-    "a message's content is null": (
-        {"prompt": [USER], "completion": [{"role": "assistant", "content": None}], "label": True},
-        "kto.completion[0].content must be a string or a list of content blocks, got NoneType",
+    # A null or missing ``content`` is accepted (``_TEXTLESS_TURNS``); another type is not.
+    "a message's content is an object": (
+        {"prompt": [USER], "completion": [{"role": "assistant", "content": {"a": 1}}],
+         "label": True},
+        "kto.completion[0].content must be a string or a list of content blocks, got dict"
+        + _DICT_HINT,
+    ),
+    "a message's content is a boolean": (
+        {"prompt": [USER], "completion": [{"role": "assistant", "content": False}], "label": True},
+        "kto.completion[0].content must be a string or a list of content blocks, got bool",
     ),
     "an unparseable label": (
         {"prompt": Q, "completion": "4", "label": "maybe"},
@@ -748,14 +859,63 @@ class TestThroughTheLoader:
 
     def test_soup_data_validate_gives_the_same_reason(self):
         bundled = {"prompt": Q, "chosen": [USER, GOOD], "rejected": [USER, BAD]}
-        bad = {"prompt": Q, "chosen": [USER, {"role": "assistant", "content": None}],
+        bad = {"prompt": Q, "chosen": [USER, {"role": "assistant", "content": {"sum": 4}}],
                "rejected": [USER, BAD]}
         stats = validate_and_stats([bundled, bad], "dpo")
         assert stats["valid_rows"] == 1
         assert (
             "row 1: dpo.chosen[1].content must be a string or a list of content blocks, "
-            "got NoneType" + _NO_TEXT
+            "got dict" + _DICT_HINT
         ) in stats["issues"]
+
+    @pytest.mark.parametrize("label", list(_TEXTLESS_TURNS))
+    def test_soup_data_validate_counts_a_turn_without_text_as_valid(self, label):
+        turn = _TEXTLESS_TURNS[label]
+        rows = [
+            {"prompt": [USER], "chosen": [turn], "rejected": [BAD]},
+            {"prompt": [USER], "chosen": [GOOD], "rejected": [turn]},
+        ]
+        stats = validate_and_stats(rows, "dpo")
+        assert stats["valid_rows"] == 2, stats["issues"]
+        assert not any("content" in issue for issue in stats["issues"]), stats["issues"]
+
+    @pytest.mark.parametrize("label", list(_TEXTLESS_TURNS))
+    @pytest.mark.parametrize("task", ["dpo", "kto"])
+    def test_a_turn_without_text_is_loaded_not_dropped(
+        self, tmp_path, monkeypatch, out, task, label
+    ):
+        """Every row of a file that has one trains, as on main (#1849 review):
+        nothing is dropped and nothing is said about dropping."""
+        turn = _TEXTLESS_TURNS[label]
+        if task == "dpo":
+            rows = [
+                {"prompt": [USER], "chosen": [GOOD], "rejected": [BAD]},
+                {"prompt": [USER], "chosen": [turn], "rejected": [BAD]},
+                {"prompt": [USER], "chosen": [GOOD], "rejected": [turn]},
+                {"prompt": Q, "chosen": [USER, turn], "rejected": [USER, BAD]},
+            ]
+            expected = [
+                {"prompt": [USER], "chosen": [GOOD], "rejected": [BAD]},
+                {"prompt": [USER], "chosen": [turn], "rejected": [BAD]},
+                {"prompt": [USER], "chosen": [GOOD], "rejected": [turn]},
+                {"prompt": [USER], "chosen": [turn], "rejected": [BAD]},
+            ]
+        else:
+            rows = [
+                {"prompt": [USER], "completion": [GOOD], "label": True},
+                {"prompt": [USER], "completion": [turn], "label": True},
+                {"prompt": [USER], "completion": [turn], "label": False},
+                {"prompt": Q, "completion": [USER, turn], "label": False},
+            ]
+            expected = [
+                {"prompt": [USER], "completion": [GOOD], "label": True},
+                {"prompt": [USER], "completion": [turn], "label": True},
+                {"prompt": [USER], "completion": [turn], "label": False},
+                {"prompt": [USER], "completion": [turn], "label": False},
+            ]
+        ds = _load(tmp_path, monkeypatch, rows, task=task, fmt=task)
+        assert ds["train"] == expected
+        assert "dropped" not in out.getvalue()
 
     def test_a_mixed_file_loads_as_conversations_and_says_so(self, tmp_path, monkeypatch, out):
         ds = _load(tmp_path, monkeypatch, [_TEXT_ROW, _CHAT_ROW, _TEXT_ROW])
