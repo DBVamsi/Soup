@@ -311,6 +311,11 @@ fallback instead of claiming an inactive selective tier. Other task wrappers
 currently treat any enabled tier as full checkpointing. Legacy boolean configs
 continue to work unchanged.
 
+GRPO, IPO, BCO, reward-model, online-DPO, pretrain and embedding explicitly
+forward this setting to their TRL/HF training arguments: `false` disables it
+and `true` enables it, including unquantized runs (`quantization: none`). These
+wrappers use full checkpointing for any enabled tier.
+
 
 ## Kernel Auto-Composition
 
@@ -1348,6 +1353,11 @@ torchao converters as of v0.71.21 (hardware-gated):
 - `unsloth_bnb_4bit: true` — promotes "Unsloth Dynamic 4-bit" from an implicit `backend=unsloth + quantization=4bit` combo to a named flag. Mutual rejection of inconsistent combos at config load.
 
 Cross-validator ordering picks the most actionable error: `quantization_aware='fp8'` prerequisite fires before the MLX rejection on `fp8_attention`, and task compatibility checks fire at config load before runtime trainer construction.
+
+On `backend: unsloth`, active `quantization_aware`, `fp8_attention` and `nvfp4`
+settings are refused at config load. They do not appear as `rejected` rows in
+`soup doctor --config`: a loadable config cannot reach such a row. Select a
+supported transformers path for these precision features.
 
 
 ## LF / Axolotl Quant Parity (v0.53.0)
