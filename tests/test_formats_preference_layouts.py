@@ -333,6 +333,16 @@ for _label, _turn_without_text in _TEXTLESS_TURNS.items():
         },
         {"prompt": [USER, _turn_without_text, USER2], "chosen": [GOOD2], "rejected": [BAD2]},
     )
+    # An explicit prompt that both answers repeat and continue is taken out of
+    # them, a turn with no text in it included: it is the same message twice.
+    _DPO_ACCEPTED[f"{_label}: in an explicit prompt that both answers repeat"] = (
+        {
+            "prompt": [USER, _turn_without_text, USER2],
+            "chosen": [USER, _turn_without_text, USER2, GOOD2],
+            "rejected": [USER, _turn_without_text, USER2, BAD2],
+        },
+        {"prompt": [USER, _turn_without_text, USER2], "chosen": [GOOD2], "rejected": [BAD2]},
+    )
     _DPO_ACCEPTED[f"{_label}: in the messages that carry the prompt"] = (
         {"messages": [USER, _turn_without_text, USER2], "chosen": [GOOD2], "rejected": [BAD2]},
         {"prompt": [USER, _turn_without_text, USER2], "chosen": [GOOD2], "rejected": [BAD2]},
@@ -549,6 +559,7 @@ class TestDpoSpellingsThatAreRefused:
             (1.5, "got float"),
             (True, "got bool"),
             ({"sum": 4}, "got dict" + _DICT_HINT),
+            ({}, "got dict" + _DICT_HINT),
         ],
     )
     def test_only_an_object_gets_the_tool_result_hint(self, content, reason_ends):
@@ -652,6 +663,14 @@ for _label, _turn_without_text in _TEXTLESS_TURNS.items():
     _KTO_ACCEPTED[f"{_label}: one message as the completion"] = (
         {"prompt": [USER], "completion": _turn_without_text, "label": 0},
         {"prompt": [USER], "completion": [_turn_without_text], "label": False},
+    )
+    _KTO_ACCEPTED[f"{_label}: in an explicit prompt that the completion repeats"] = (
+        {
+            "prompt": [USER, _turn_without_text, USER2],
+            "completion": [USER, _turn_without_text, USER2, GOOD2],
+            "label": True,
+        },
+        {"prompt": [USER, _turn_without_text, USER2], "completion": [GOOD2], "label": True},
     )
     _KTO_ACCEPTED[f"{_label}: in the prompt"] = (
         {"prompt": [USER, _turn_without_text, USER2], "completion": [GOOD2], "label": True},
