@@ -158,7 +158,33 @@ def _mask_short_bundle(tok: str, short_opts: set[str]) -> tuple[str, bool] | Non
     return None
 
 
-def mask_secret_args(args: Sequence[str], secret_opts: frozenset[str]) -> tuple[str, ...]:
+def all_long_option_strings(root: click.Command) -> frozenset[str]:
+    """Every ``--name`` any command of the tree declares, switches included."""
+    found: set[str] = set()
+    for command in iter_commands(root):
+        for param in getattr(command, "params", None) or ():
+            found.update(_long_names(param))
+    return frozenset(found)
+
+
+def _starts_an_option(tok: str, known: frozenset[str] | set[str]) -> bool:
+    """Whether ``tok``, found where a credential's value belongs, is an option instead.
+
+    Only a long option the command tree declares, or one whose own name is a
+    credential name, is read as an option there. Anything else is the value,
+    even when it starts with ``--``.
+    """
+    if not tok.startswith("--"):
+        return False
+    name = tok.partition("=")[0]
+    return name in known or is_secret_name(name)
+
+
+def mask_secret_args(
+    args: Sequence[str],
+    secret_opts: frozenset[str],
+    known_opts: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
     """Return ``args`` with the value of every credential option masked.
 
     An option is a credential option when it is in ``secret_opts`` (what the
@@ -170,10 +196,14 @@ def mask_secret_args(args: Sequence[str], secret_opts: frozenset[str]) -> tuple[
     Handles ``--opt value``, ``--opt=value``, ``-o value``, ``-oVALUE`` and
     bundled short options (``-xoVALUE`` / ``-xo VALUE``, where ``-x`` is a flag
     and ``-o`` takes the value). An option with no following value is kept as
-    is, and a token that starts with ``--`` is never taken as a value, so a
+    is. The token after a credential option is its value and is masked, unless
+    it is a long option in ``known_opts`` (every long option of the command
+    tree) or ``secret_opts``, or has a credential name itself: then the option
+    before it had no value and the scan continues from the new option, so a
     switch in front of a credential option cannot shift the mask off its value.
     """
     long_opts = {o for o in secret_opts if o.startswith("--")}
+    known_longs = long_opts | known_opts
     short_opts = {o for o in secret_opts if not o.startswith("--") and len(o) == 2}
     out: list[str] = []
     mask_next = False
@@ -181,11 +211,11 @@ def mask_secret_args(args: Sequence[str], secret_opts: frozenset[str]) -> tuple[
         tok = str(raw)
         if mask_next:
             mask_next = False
-            if not tok.startswith("--"):
+            if not _starts_an_option(tok, known_longs):
                 out.append(REDACTED)
                 continue
-            # A long option is never a value: the option before it had none,
-            # and this one is scanned like any other.
+            # An option, not a value: the option before it had none, and this
+            # one is scanned like any other.
         if tok in secret_opts:
             out.append(tok)
             mask_next = True

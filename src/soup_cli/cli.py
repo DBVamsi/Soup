@@ -833,6 +833,7 @@ def _mask_audit_args(command: str, args: list[str]) -> tuple[str, ...]:
     """
     global _ALL_SECRET_OPTION_STRINGS
     from soup_cli.utils.argv_redaction import (
+        all_long_option_strings,
         all_secret_option_strings,
         mask_secret_args,
         resolve_command,
@@ -853,7 +854,7 @@ def _mask_audit_args(command: str, args: list[str]) -> tuple[str, ...]:
             secret_opts = secret_option_strings(resolved) | app_wide_longs
     except Exception:  # noqa: BLE001 — fall back to the widest mask
         secret_opts = everything
-    return mask_secret_args(args, secret_opts)
+    return mask_secret_args(args, secret_opts, all_long_option_strings(root))
 
 
 def _emit_audit_event(argv: list[str], exit_code: int) -> None:

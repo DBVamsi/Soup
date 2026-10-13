@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import typer
 
+from soup_cli.utils import argv_redaction
 from soup_cli.utils.argv_redaction import (
     NOT_SECRET_OPTIONS,
     REDACTED,
@@ -354,12 +355,16 @@ def test_no_real_switch_has_a_name_the_rule_would_mask(cli):
         (["--keep-key-cache", "--api-key", "S1"], ("--keep-key-cache", "--api-key", REDACTED)),
         (["--api-key", "--auth-token", "S1"], ("--api-key", "--auth-token", REDACTED)),
         (["--api-key", "--auth-token=S1"], ("--api-key", f"--auth-token={REDACTED}")),
-        (["--api-key", "--model", "m"], ("--api-key", "--model", "m")),
-        (["--use-token", "--", "S1"], ("--use-token", "--", "S1")),
+        (["--hf-token", "--abc123"], ("--hf-token", REDACTED)),
+        (["--hf-token", "--abc123", "next"], ("--hf-token", REDACTED, "next")),
+        (["--hf-token=--abc123"], (f"--hf-token={REDACTED}",)),
+        (["--api-key", "--model", "m"], ("--api-key", REDACTED, "m")),
+        (["--use-token", "--", "S1"], ("--use-token", REDACTED, "S1")),
         (["--api-key", "--api-key", "--api-key", "S1"], ("--api-key",) * 3 + (REDACTED,)),
     ],
 )
-def test_a_long_option_after_a_credential_option_is_scanned_not_masked(args, expected):
+def test_only_a_credential_named_option_is_read_as_an_option_without_a_tree(args, expected):
+    """Anything else that follows a credential option is its value, dashes or not."""
     assert mask_secret_args(args, frozenset()) == expected
 
 
@@ -367,13 +372,17 @@ def test_a_long_option_after_a_credential_option_is_scanned_not_masked(args, exp
     ("args", "expected"),
     [
         (["--token", "--repo", "u/m"], ("--token", "--repo", "u/m")),
+        (["--token", "--repo=u/m"], ("--token", "--repo=u/m")),
+        (["--token", "--abc123", "--repo", "u/m"], ("--token", REDACTED, "--repo", "u/m")),
+        (["-t", "--abc123"], ("-t", REDACTED)),
         (["-t", "--token", "S1"], ("-t", "--token", REDACTED)),
         (["-xt", "--repo", "u/m"], ("-xt", "--repo", "u/m")),
         (["-t", "-S1"], ("-t", REDACTED)),
     ],
 )
-def test_the_same_holds_for_options_the_tree_declares(args, expected):
-    assert mask_secret_args(args, frozenset({"--token", "-t"})) == expected
+def test_a_long_option_the_tree_knows_is_read_as_an_option(args, expected):
+    known = frozenset({"--token", "--repo"})
+    assert mask_secret_args(args, frozenset({"--token", "-t"}), known) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +396,55 @@ def test_a_foreign_group_masks_the_short_alias_of_its_command(cli, monkeypatch):
     monkeypatch.setattr(typer.main, "get_command", lambda app: root)
     assert cli._mask_audit_args("hub", ["-t", "VALUE", "--repo", "u/m"]) == (
         "-t",
+        REDACTED,
+        "--repo",
+        "u/m",
+    )
+
+
+def test_the_real_tree_tells_a_known_option_from_a_value_that_starts_with_dashes(cli):
+    assert cli._mask_audit_args("serve", ["--api-key", "--model", "m"]) == (
+        "--api-key",
+        "--model",
+        "m",
+    )
+    assert cli._mask_audit_args("serve", ["--api-key", "--abc123", "--model", "m"]) == (
+        "--api-key",
+        REDACTED,
+        "--model",
+        "m",
+    )
+
+
+def test_every_long_option_of_a_tree_is_collected(tree):
+    assert argv_redaction.all_long_option_strings(tree) == {
+        "--model",
+        "--api-key",
+        "--tool-auth-token",
+        "--use-auth-token",
+        "--token-verbosity",
+        "--max-tokens",
+        "--cache",
+        "--no-key-cache",
+        "--rows",
+        "--data-secret",
+    }
+
+
+# ---------------------------------------------------------------------------
+# A command that cannot be resolved is masked with every option of the app
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_resolution_still_masks_short_aliases_and_long_names(cli, monkeypatch):
+    def _fails(root, args):
+        raise RuntimeError("the command could not be resolved")
+
+    monkeypatch.setattr(argv_redaction, "resolve_command", _fails)
+    assert cli._mask_audit_args("push", ["-t", "S3CRET", "--token", "V2", "--repo", "u/m"]) == (
+        "-t",
+        REDACTED,
+        "--token",
         REDACTED,
         "--repo",
         "u/m",
