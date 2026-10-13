@@ -39,20 +39,26 @@ class _NetworkRefusedError(OSError):
     """Raised in place of a name lookup or a socket connect."""
 
 
-@pytest.fixture(autouse=True)
-def refused_network(monkeypatch):
-    """Refuse every name lookup and every socket connect, and fail a test that tried.
+@contextlib.contextmanager
+def _network_refused():
+    """Refuse every name lookup and every socket connect; fail on exit if any was tried.
 
     An ``OSError``, so a client library reports it as the connection error it
     stands for and ``chat_send`` takes its real "Connection failed" branch. That
     branch swallows the exception, which is why the attempts are also counted and
-    checked when the test is over. A test that asks for a refusal on purpose
-    clears the list itself.
+    checked when the block is over. Code that asks for a refusal on purpose clears
+    the list itself. ``socket.getfqdn`` swallows it too, and ``gethostbyaddr`` is
+    the call it makes.
 
     One exemption. ``socket.socketpair`` on Windows is a listening socket and a
     ``connect`` to it on 127.0.0.1, and every event loop makes one for its
     self-pipe. The test client starts a loop per request, so a connect made inside
-    ``socketpair`` goes through. It cannot leave the process.
+    ``socketpair`` goes through. It cannot leave the process. The exemption is
+    per thread and ends when ``socketpair`` returns. Nowhere else does it exist:
+    Linux and macOS build the pair without a connect.
+
+    This is a helper rather than only a fixture so that the guard itself can be
+    tested (``TestThisFileIsOffline``).
     """
     attempts = []
     plumbing = threading.local()
@@ -81,20 +87,28 @@ def refused_network(monkeypatch):
             return real_connect_ex(sock, address)
         return refuse("connect_ex", address)
 
-    monkeypatch.setattr(socket, "socketpair", socketpair)
-    monkeypatch.setattr(socket.socket, "connect", connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
-    monkeypatch.setattr(
-        socket, "create_connection",
-        lambda address, *_args, **_kwargs: refuse("create_connection", address),
-    )
-    for lookup in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr"):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(socket, "socketpair", socketpair)
+        monkeypatch.setattr(socket.socket, "connect", connect)
+        monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
         monkeypatch.setattr(
-            socket, lookup,
-            lambda host, *_args, _kind=lookup, **_kwargs: refuse(_kind, host),
+            socket, "create_connection",
+            lambda address, *_args, **_kwargs: refuse("create_connection", address),
         )
-    yield attempts
+        for lookup in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr"):
+            monkeypatch.setattr(
+                socket, lookup,
+                lambda host, *_args, _kind=lookup, **_kwargs: refuse(_kind, host),
+            )
+        yield attempts
     assert attempts == [], f"this test tried to reach the network: {attempts}"
+
+
+@pytest.fixture(autouse=True)
+def refused_network():
+    """``_network_refused`` for every test in this file; yields the attempts list."""
+    with _network_refused() as attempts:
+        yield attempts
 
 
 class _Upstream:
@@ -515,3 +529,117 @@ class TestThisFileIsOffline:
         finally:
             left.close()
             right.close()
+
+    # What follows tests the guard itself: its teardown, its scope and its edges.
+    # Every target below is local, so a guard that let a call through would fail
+    # the test and still not leave the machine.
+
+    def test_the_guard_applies_to_a_test_that_does_not_ask_for_it(self, request):
+        """``autouse``: the tests above that never name the fixture are covered too."""
+        assert "refused_network" in request.fixturenames
+
+    @pytest.mark.parametrize(
+        ("lookup", "args"),
+        [
+            ("getaddrinfo", ("localhost", 443)),
+            ("gethostbyname", ("localhost",)),
+            ("gethostbyname_ex", ("localhost",)),
+            ("gethostbyaddr", ("127.0.0.1",)),
+        ],
+    )
+    def test_every_name_lookup_is_refused(self, refused_network, lookup, args):
+        with pytest.raises(_NetworkRefusedError):
+            getattr(socket, lookup)(*args)
+        assert refused_network == [(lookup, args[0])]
+        refused_network.clear()  # asked for on purpose
+
+    def test_getfqdn_is_refused_through_gethostbyaddr(self, refused_network):
+        """The call behind ``HTTPServer.server_bind``, which swallows the refusal.
+
+        ``getfqdn`` falls back to the name it was given, so only the attempt log
+        shows that it went to the resolver.
+        """
+        assert socket.getfqdn("127.0.0.1") == "127.0.0.1"
+        assert refused_network == [("gethostbyaddr", "127.0.0.1")]
+        refused_network.clear()  # asked for on purpose
+
+    def test_a_refusal_that_the_code_swallowed_still_fails_the_block(self):
+        """The reason for the attempt list: the code under test may catch the OSError."""
+        with pytest.raises(AssertionError, match=r"tried to reach the network.*getaddrinfo"):
+            with _network_refused():
+                with contextlib.suppress(OSError):
+                    socket.getaddrinfo("localhost", 443)
+
+    def test_a_block_that_stays_offline_passes(self):
+        with _network_refused() as attempts:
+            pass
+        assert attempts == []
+
+    def test_the_exemption_ends_when_socketpair_returns(self, refused_network):
+        """A connect after a ``socketpair`` is refused, on Windows and everywhere else.
+
+        The target is a listener of this test's own, so a connect that got through
+        would succeed at once instead of waiting on a refused port.
+        """
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            address = listener.getsockname()
+            left, right = socket.socketpair()
+            left.close()
+            right.close()
+            with socket.socket() as client:
+                with pytest.raises(_NetworkRefusedError):
+                    client.connect(address)
+                with pytest.raises(_NetworkRefusedError):
+                    client.connect_ex(address)
+        assert refused_network == [("connect", address), ("connect_ex", address)]
+        refused_network.clear()  # asked for on purpose
+
+    def test_the_exemption_ends_when_socketpair_raises(self):
+        """The same, for a ``socketpair`` that fails (no free port, out of descriptors)."""
+
+        def failing_socketpair(*_args, **_kwargs):
+            raise OSError("no socketpair")
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(socket, "socketpair", failing_socketpair)
+            with _network_refused() as attempts:
+                with pytest.raises(OSError, match="no socketpair"):
+                    socket.socketpair()
+                with socket.socket() as client:
+                    with pytest.raises(_NetworkRefusedError):
+                        client.connect(("127.0.0.2", 8000))
+                assert attempts == [("connect", ("127.0.0.2", 8000))]
+                attempts.clear()  # asked for on purpose
+
+    def test_the_exemption_belongs_to_the_thread_inside_socketpair(self):
+        """A second thread's connect is refused while the first is inside ``socketpair``.
+
+        ``blocked_socketpair`` stands in for the real one and holds the worker
+        there until the main thread has made its attempt: two events, no sleeps.
+        It is installed before the guard, because the guard wraps whatever
+        ``socket.socketpair`` is when it starts.
+        """
+        inside, release = threading.Event(), threading.Event()
+
+        def blocked_socketpair(*_args, **_kwargs):
+            inside.set()
+            release.wait(timeout=10)
+            return None, None
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(socket, "socketpair", blocked_socketpair)
+            with _network_refused() as attempts:
+                worker = threading.Thread(target=socket.socketpair)
+                worker.start()
+                try:
+                    assert inside.wait(timeout=10), "the worker never entered socketpair"
+                    with socket.socket() as client:
+                        with pytest.raises(_NetworkRefusedError):
+                            client.connect(("127.0.0.2", 8000))
+                finally:
+                    release.set()
+                    worker.join(timeout=10)
+                assert attempts == [("connect", ("127.0.0.2", 8000))]
+                attempts.clear()  # asked for on purpose
