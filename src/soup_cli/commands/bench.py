@@ -381,7 +381,7 @@ def train(
         console.print(f"[red]Config not found:[/] {escape(config)}")
         raise typer.Exit(1)
     try:
-        cfg = load_config(Path(config))
+        cfg = load_config(Path(config), raise_unreadable=True)
     except Exception as exc:  # noqa: BLE001 -- surfaced to the user as-is
         console.print(f"[red]Config invalid:[/] {escape(str(exc))}")
         raise typer.Exit(1) from exc

@@ -116,7 +116,7 @@ def _clip(detail: str) -> str:
     return detail[:_MAX_DETAIL_CHARS] + "..."
 
 
-def _read_config_file(path: Path) -> object:
+def _read_config_file(path: Path, *, raise_unreadable: bool = False) -> object:
     """Load the YAML document at ``path``, or exit 1 naming what stopped it.
 
     A file over a limit, a directory, a file the OS will not let us read, bytes
@@ -125,8 +125,14 @@ def _read_config_file(path: Path) -> object:
     problem; text taken from the file is cut to ``_MAX_DETAIL_CHARS``. A
     missing file is left to the caller as ``FileNotFoundError``, and any other
     exception is passed on as itself.
+
+    With ``raise_unreadable`` nothing is printed and nothing exits: the caller
+    gets the exception itself (``YamlLimitError``, ``yaml.YAMLError``,
+    ``UnicodeDecodeError``, ``OSError``) to report in its own words.
     """
     what = f"Config file {path}"
+    if raise_unreadable:
+        return load_yaml_file_limited(path, what, max_bytes=MAX_CONFIG_BYTES)
     if path.is_dir():
         _refuse(f"{what} is a directory, not a file")
     try:
@@ -182,6 +188,7 @@ def load_config(
     path: "Path | str",
     *,
     training_overrides: dict | None = None,
+    raise_unreadable: bool = False,
 ) -> SoupConfig:
     """Load a soup.yaml file and return validated SoupConfig.
 
@@ -193,9 +200,12 @@ def load_config(
     (at most :data:`MAX_CONFIG_BYTES`, bounded nesting and alias expansion);
     a file over one of them exits 1 with a message naming the file and the
     limit, before anything walks the document. So does a file that cannot
-    be read as YAML at all; see :func:`_read_config_file`.
+    be read as YAML at all; see :func:`_read_config_file`. A caller that
+    reports such a file in its own words passes ``raise_unreadable=True``
+    and receives the exception instead; a config that reads but does not
+    validate still exits 1 with the loader's message either way.
     """
-    raw = _read_config_file(Path(path))
+    raw = _read_config_file(Path(path), raise_unreadable=raise_unreadable)
 
     if raw is None:
         console.print("[red]Config file is empty[/]")

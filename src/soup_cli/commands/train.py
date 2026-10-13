@@ -2599,7 +2599,9 @@ def _run_live_lr_sweep(
     from soup_cli.utils.lr_finder import LrSweepUnavailableError, SweepTooShortError
 
     try:
-        cfg = load_config(config_path)
+        # The refusal below quotes the reason, so the loader hands it over
+        # instead of printing its own line and exiting.
+        cfg = load_config(config_path, raise_unreadable=True)
     except Exception as exc:  # noqa: BLE001 — one refusal line, not a traceback
         raise LrSweepUnavailableError(
             f"--find-lr: config load failed ({exc}); no LR report was written."

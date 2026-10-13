@@ -325,6 +325,75 @@ class TestConfigFile:
         with pytest.raises(FileNotFoundError):
             load_config("absent.yaml")
 
+    @pytest.mark.parametrize(
+        ("content", "error"),
+        [
+            (b"base: [unclosed\ntask: }\n", yaml.YAMLError),
+            (b"base: caf\xe9\n", UnicodeDecodeError),
+            (b"extra: 2026-02-30\n", yaml.YAMLError),
+            (b"#" + b"x" * MAX_CONFIG_BYTES, YamlLimitError),
+            (("deep: " + "[" * MAX_YAML_NESTING + "]" * MAX_YAML_NESTING).encode(), YamlLimitError),
+        ],
+        ids=["syntax", "not-utf8", "date", "size", "nesting"],
+    )
+    def test_a_caller_that_asks_gets_the_exception_and_no_output(
+        self, in_tmp, capsys, content, error
+    ):
+        (in_tmp / "soup.yaml").write_bytes(content)
+        with pytest.raises(error):
+            load_config("soup.yaml", raise_unreadable=True)
+        captured = capsys.readouterr()
+        assert captured.out == captured.err == ""
+
+    def test_a_caller_that_asks_gets_the_os_error_for_a_directory(self, in_tmp, capsys):
+        (in_tmp / "soup.yaml").mkdir()
+        with pytest.raises(OSError):
+            load_config("soup.yaml", raise_unreadable=True)
+        assert capsys.readouterr().out == ""
+
+    def test_asking_changes_nothing_for_a_config_that_reads(self, in_tmp, capsys):
+        (in_tmp / "soup.yaml").write_text(_VALID, encoding="utf-8")
+        assert load_config("soup.yaml", raise_unreadable=True) == load_config("soup.yaml")
+        (in_tmp / "soup.yaml").write_text(_VALID + "trainning: {}\n", encoding="utf-8")
+        with pytest.raises(SystemExit):
+            load_config("soup.yaml", raise_unreadable=True)
+        assert "Config validation error" in _plain(capsys.readouterr().out)
+
+    @pytest.mark.parametrize(
+        ("argv", "sentence", "code"),
+        [
+            (
+                ["train", "--config", "soup.yaml", "--find-lr"],
+                "--find-lr: config load failed (while parsing a flow sequence",
+                1,
+            ),
+            (
+                ["bench", "train", "--config", "soup.yaml", "--steps", "4", "--warmup", "1"],
+                "Config invalid: while parsing a flow sequence",
+                1,
+            ),
+            (
+                ["doctor", "--config", "soup.yaml"],
+                "Config could not be loaded: while parsing a flow sequence",
+                2,
+            ),
+        ],
+        ids=["train-find-lr", "bench-train", "doctor"],
+    )
+    def test_a_command_with_its_own_sentence_for_an_unreadable_config_keeps_it(
+        self, in_tmp, argv, sentence, code
+    ):
+        """These three quote the reason themselves, so the loader hands it over."""
+        from soup_cli.cli import app
+
+        (in_tmp / "soup.yaml").write_text("base: m\ndata: [unclosed\n", encoding="utf-8")
+        result = CliRunner().invoke(app, argv)
+        output = _plain(result.output)
+        assert result.exit_code == code, (result.output, repr(result.exception))
+        assert sentence in output, output
+        assert "data: [unclosed" in output, output
+        assert "is not valid YAML" not in output, output
+
     def test_training_overrides_still_reach_the_config(self, in_tmp):
         (in_tmp / "soup.yaml").write_text(_VALID, encoding="utf-8")
         assert load_config("soup.yaml", training_overrides={"epochs": 7}).training.epochs == 7
