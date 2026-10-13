@@ -65,6 +65,18 @@ TOOL_CALL = {
     "content": None,
     "tool_calls": [{"type": "function", "function": {"name": "add", "arguments": "{}"}}],
 }
+#: The legacy spelling of a tool call, and the turn an export leaves behind
+#: when it writes a ``tool_calls`` list on every turn. Both loaded and trained
+#: before this converter looked at messages, so both still convert.
+FUNCTION_CALL = {
+    "role": "assistant",
+    "content": None,
+    "function_call": {"name": "add", "arguments": "{}"},
+}
+NO_CALLS = {"role": "assistant", "content": None, "tool_calls": []}
+TOOL_RESULT = {"role": "tool", "content": '{"sum": 4}'}
+TOOL_RESULT_OBJECT = {"role": "tool", "content": {"sum": 4}}
+_NO_TEXT = " (a turn without text needs tool_calls or function_call)"
 
 
 def _layout(row: dict, fields: tuple[str, ...]) -> str:
@@ -176,6 +188,24 @@ _DPO_ACCEPTED = {
         {"chosen": [USER, GOOD, USER2, GOOD2], "rejected": [USER, GOOD]},
         {"prompt": [USER], "chosen": [GOOD, USER2, GOOD2], "rejected": [GOOD]},
     ),
+    # A shared turn is the same message, not a turn of the same role: here the
+    # two answers part at the first assistant turn, although every later turn
+    # has the role of its opposite number.
+    "the answers part early and go on for several turns": (
+        {
+            "prompt": Q,
+            "chosen": [USER, GOOD, USER2, GOOD2],
+            "rejected": [USER, BAD, USER2, BAD2],
+        },
+        {"prompt": [USER], "chosen": [GOOD, USER2, GOOD2], "rejected": [BAD, USER2, BAD2]},
+    ),
+    # Role order is not checked. Two answers that open with different user
+    # turns share nothing, so the string is the user turn and both are kept
+    # whole: nothing is merged on the strength of a role.
+    "the answers open with different user turns and share none": (
+        {"prompt": Q, "chosen": [USER, GOOD], "rejected": [USER2, BAD]},
+        {"prompt": [ASKED], "chosen": [USER, GOOD], "rejected": [USER2, BAD]},
+    ),
     # --- trl's explicit layout --------------------------------------------------
     "explicit": (
         {"prompt": [USER], "chosen": [GOOD], "rejected": [BAD]},
@@ -185,10 +215,20 @@ _DPO_ACCEPTED = {
         {"prompt": [SYS, USER], "chosen": [SYS, USER, GOOD], "rejected": [SYS, USER, BAD]},
         {"prompt": [SYS, USER], "chosen": [GOOD], "rejected": [BAD]},
     ),
-    # Only a prompt that EVERY answer repeats and continues is taken out of them.
+    # Only a prompt that EVERY answer repeats and continues is taken out of
+    # them. A row where one answer repeats it and the other does not is left as
+    # written, as it always was (that answer still carries the prompt twice).
+    "explicit, only one answer repeats the prompt: left as written": (
+        {"prompt": [SYS, USER], "chosen": [SYS, USER, GOOD], "rejected": [BAD]},
+        {"prompt": [SYS, USER], "chosen": [SYS, USER, GOOD], "rejected": [BAD]},
+    ),
     "explicit, an answer that is only the prompt is left as written": (
         {"prompt": [USER], "chosen": [USER], "rejected": [USER, BAD]},
         {"prompt": [USER], "chosen": [USER], "rejected": [USER, BAD]},
+    ),
+    "explicit, an answer that begins with part of the prompt is left as written": (
+        {"prompt": [SYS, USER], "chosen": [SYS, GOOD], "rejected": [SYS, USER2, BAD]},
+        {"prompt": [SYS, USER], "chosen": [SYS, GOOD], "rejected": [SYS, USER2, BAD]},
     ),
     "explicit, the prompt is one message": (
         {"prompt": USER, "chosen": [GOOD], "rejected": [BAD]},
@@ -209,6 +249,22 @@ _DPO_ACCEPTED = {
     "explicit, an assistant tool call without content": (
         {"prompt": [USER], "chosen": [TOOL_CALL], "rejected": [BAD]},
         {"prompt": [USER], "chosen": [TOOL_CALL], "rejected": [BAD]},
+    ),
+    "explicit, a legacy function_call without content": (
+        {"prompt": [USER], "chosen": [FUNCTION_CALL], "rejected": [BAD]},
+        {"prompt": [USER], "chosen": [FUNCTION_CALL], "rejected": [BAD]},
+    ),
+    "explicit, an empty tool_calls list and no content": (
+        {"prompt": [USER], "chosen": [NO_CALLS], "rejected": [BAD]},
+        {"prompt": [USER], "chosen": [NO_CALLS], "rejected": [BAD]},
+    ),
+    "bundled, a tool call and its result are part of the shared turns": (
+        {
+            "prompt": Q,
+            "chosen": [USER, TOOL_CALL, TOOL_RESULT, GOOD],
+            "rejected": [USER, TOOL_CALL, TOOL_RESULT, BAD],
+        },
+        {"prompt": [USER, TOOL_CALL, TOOL_RESULT], "chosen": [GOOD], "rejected": [BAD]},
     ),
     # --- no prompt key ------------------------------------------------------------
     "no prompt: trl's implicit layout": (
@@ -342,6 +398,32 @@ _DPO_REFUSED = {
         {"prompt": Q, "chosen": [USER, {"content": "4"}], "rejected": [USER, BAD]},
         "dpo.chosen[1].role must be a non-empty string",
     ),
+    "a message's role is an empty string": (
+        {"prompt": [{"role": "", "content": Q}], "chosen": [GOOD], "rejected": [BAD]},
+        "dpo.prompt[0].role must be a non-empty string",
+    ),
+    "a message's role is a number": (
+        {"prompt": [{"role": 1, "content": Q}], "chosen": [GOOD], "rejected": [BAD]},
+        "dpo.prompt[0].role must be a non-empty string",
+    ),
+    "a message's role is a list": (
+        {"prompt": [USER], "chosen": [GOOD], "rejected": [{"role": ["assistant"], "content": "x"}]},
+        "dpo.rejected[0].role must be a non-empty string",
+    ),
+    # A blank ``messages`` key is no prompt, like a blank ``prompt``: the row is
+    # told it has none, not that the key it did not mean to use is malformed.
+    "an empty messages list is no prompt": (
+        {"messages": [], "chosen": [GOOD], "rejected": [BAD]},
+        "dpo.prompt is missing and dpo.chosen and dpo.rejected share no leading turn",
+    ),
+    "a blank messages string is no prompt": (
+        {"messages": "  ", "chosen": [GOOD], "rejected": [BAD]},
+        "dpo.prompt is missing and dpo.chosen and dpo.rejected share no leading turn",
+    ),
+    "a blank messages key beside string answers is no prompt": (
+        {"messages": [], "chosen": "4", "rejected": "Fish"},
+        "dpo.prompt must not be null",
+    ),
     "an answer is an object that is not a message": (
         {"prompt": Q, "chosen": {"text": "4"}, "rejected": BAD},
         "dpo.chosen[0].role must be a non-empty string",
@@ -352,11 +434,34 @@ _DPO_REFUSED = {
             "chosen": [USER, {"role": "assistant", "content": None}],
             "rejected": [USER, BAD],
         },
-        "dpo.chosen[1].content must be a string or a list of content blocks, got NoneType",
+        "dpo.chosen[1].content must be a string or a list of content blocks, got NoneType"
+        + _NO_TEXT,
     ),
     "a message has no content": (
         {"prompt": [{"role": "user"}], "chosen": [GOOD], "rejected": [BAD]},
-        "dpo.prompt[0].content must be a string or a list of content blocks, got NoneType",
+        "dpo.prompt[0].content must be a string or a list of content blocks, got NoneType"
+        + _NO_TEXT,
+    ),
+    # A null ``tool_calls`` is no call (Arrow writes the key on every turn).
+    "a message's content and its tool_calls are both null": (
+        {
+            "prompt": [USER],
+            "chosen": [{"role": "assistant", "content": None, "tool_calls": None}],
+            "rejected": [BAD],
+        },
+        "dpo.chosen[0].content must be a string or a list of content blocks, got NoneType"
+        + _NO_TEXT,
+    ),
+    # Never loaded: beside string contents Arrow refuses it ("cannot mix struct
+    # and non-struct, non-null values"), after the model has loaded.
+    "a tool result that is a JSON object": (
+        {
+            "prompt": Q,
+            "chosen": [USER, TOOL_CALL, TOOL_RESULT_OBJECT, GOOD],
+            "rejected": [USER, TOOL_CALL, TOOL_RESULT_OBJECT, BAD],
+        },
+        "dpo.chosen[2].content must be a string or a list of content blocks, got dict "
+        "(write a JSON tool result as a JSON string)",
     ),
     "a message's content is a number": (
         {
@@ -365,6 +470,10 @@ _DPO_REFUSED = {
             "rejected": [USER, {"role": "assistant", "content": 4}],
         },
         "dpo.rejected[1].content must be a string or a list of content blocks, got int",
+    ),
+    "a message's content is a boolean": (
+        {"prompt": [USER], "chosen": [GOOD], "rejected": [{"role": "assistant", "content": True}]},
+        "dpo.rejected[0].content must be a string or a list of content blocks, got bool",
     ),
     "messages that are not a list, used as the prompt": (
         {"messages": "What is 2+2?", "chosen": [GOOD], "rejected": [BAD]},
@@ -404,6 +513,10 @@ _KTO_ACCEPTED = {
         {"prompt": Q, "completion": "4", "label": True},
         {"prompt": Q, "completion": "4", "label": True},
     ),
+    "text, an undesirable completion": (
+        {"prompt": Q, "completion": "Fish", "label": False},
+        {"prompt": Q, "completion": "Fish", "label": False},
+    ),
     "explicit": (
         {"prompt": [USER], "completion": [GOOD], "label": True},
         {"prompt": [USER], "completion": [GOOD], "label": True},
@@ -435,6 +548,11 @@ _KTO_ACCEPTED = {
     "explicit, a completion that is only the prompt is left as written": (
         {"prompt": [USER], "completion": [USER], "label": False},
         {"prompt": [USER], "completion": [USER], "label": False},
+    ),
+    # Longer than the prompt is not enough: its leading turns have to BE the prompt.
+    "explicit, a completion that opens with another turn is left as written": (
+        {"prompt": [USER], "completion": [USER2, GOOD], "label": True},
+        {"prompt": [USER], "completion": [USER2, GOOD], "label": True},
     ),
     "list prompt, string completion": (
         {"prompt": [USER], "completion": "4", "label": True},
@@ -572,6 +690,22 @@ class TestOneLayoutPerDataset:
         unified, _ = unify_preference_layout(rows)
         assert unified[0] == {**_TEXT_ROW_AS_CHAT, "answer": "4"}
 
+    def test_a_row_that_has_answers_and_no_prompt_key_is_passed_over(self):
+        """Not a converted row (the converters always write ``prompt``): source
+        columns kept for another task can look like this."""
+        rows = [{"chosen": [GOOD], "rejected": [BAD]}, dict(_CHAT_ROW), dict(_TEXT_ROW)]
+        unified, promoted = unify_preference_layout(rows)
+        assert promoted == 1
+        assert unified == [rows[0], _CHAT_ROW, _TEXT_ROW_AS_CHAT]
+
+    def test_a_row_whose_answer_is_not_a_string_is_left_alone(self):
+        """Only a row that IS text is rewritten; anything else is not ours to wrap."""
+        odd = {"prompt": Q, "chosen": 5, "rejected": "Fish"}
+        rows = [odd, dict(_CHAT_ROW)]
+        unified, promoted = unify_preference_layout(rows)
+        assert unified is rows and promoted == 0
+        assert rows[0] == {"prompt": Q, "chosen": 5, "rejected": "Fish"}
+
 
 # --------------------------------------------------------------------------
 # through the loader: what `soup train` and `soup data validate` say
@@ -620,7 +754,7 @@ class TestThroughTheLoader:
         assert stats["valid_rows"] == 1
         assert (
             "row 1: dpo.chosen[1].content must be a string or a list of content blocks, "
-            "got NoneType"
+            "got NoneType" + _NO_TEXT
         ) in stats["issues"]
 
     def test_a_mixed_file_loads_as_conversations_and_says_so(self, tmp_path, monkeypatch, out):
@@ -634,7 +768,7 @@ class TestThroughTheLoader:
     def test_a_file_of_one_layout_prints_nothing_about_it(self, tmp_path, monkeypatch, out):
         ds = _load(tmp_path, monkeypatch, [_TEXT_ROW, _TEXT_ROW])
         assert ds["train"] == [_TEXT_ROW, _TEXT_ROW]
-        assert "plain-text preference rows" not in out.getvalue()
+        assert "plain-text preference row" not in out.getvalue()
         assert "dropped" not in out.getvalue()
 
     def test_each_split_is_unified_on_its_own(self, tmp_path, monkeypatch, out):
@@ -648,7 +782,35 @@ class TestThroughTheLoader:
         )
         assert result["train"] == [_CHAT_ROW, _TEXT_ROW_AS_CHAT]
         assert result["val"] == [_TEXT_ROW]
-        assert "1 of 2 train rows are plain-text preference rows" in out.getvalue()
+        text = " ".join(out.getvalue().split())
+        assert "Note: 1 of 2 train rows is a plain-text preference row in a dataset" in text
+        assert "It was rewritten as one user turn" in text
+        assert " val " not in text
+
+    def test_the_note_counts_in_the_plural(self, out):
+        cfg = load_config_from_string(
+            "base: x\ntask: dpo\ndata:\n  train: d.jsonl\n  format: dpo\n  val_split: 0\n"
+        )
+        loader._finalize([dict(_CHAT_ROW), dict(_TEXT_ROW), dict(_TEXT_ROW)], cfg.data)
+        text = " ".join(out.getvalue().split())
+        assert "Note: 2 of 3 train rows are plain-text preference rows in a dataset" in text
+        assert "Each was rewritten as one user turn" in text
+
+    def test_two_interleaved_files_in_different_layouts_are_unified(
+        self, tmp_path, monkeypatch, out
+    ):
+        """Each file has one layout and the dataset has two, which is why the
+        layouts are unified where the splits are final and not per file."""
+        monkeypatch.chdir(tmp_path)
+        for name, row in (("text.jsonl", _TEXT_ROW), ("chat.jsonl", _CHAT_ROW)):
+            (tmp_path / name).write_text((json.dumps(row) + "\n") * 2, encoding="utf-8")
+        cfg = load_config_from_string(
+            "base: x\ntask: dpo\ndata:\n  train: [text.jsonl, chat.jsonl]\n"
+            "  interleave: concat\n  format: dpo\n  val_split: 0\n"
+        )
+        ds = loader.load_dataset(cfg.data)
+        assert ds["train"] == [_TEXT_ROW_AS_CHAT] * 2 + [_CHAT_ROW] * 2
+        assert "2 of 4 train rows are plain-text preference rows" in out.getvalue()
 
     def test_a_split_taken_from_a_mixed_file_trains(self, tmp_path, monkeypatch, out):
         rows = [_TEXT_ROW, _CHAT_ROW] * 10

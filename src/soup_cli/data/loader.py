@@ -412,8 +412,8 @@ def _finalize(
 
     # #1849: text and conversational preference rows cannot share a dataset
     # (one Arrow type per column; trl reads the layout off the first row).
-    # Here rather than per file, so a replay or interleaved source in the
-    # other layout is covered too. trl prepares train and val separately.
+    # Here rather than per file, so interleaved files in different layouts are
+    # covered too. trl prepares train and val separately.
     for split in ("train", "val"):
         rows = result.get(split)
         if not isinstance(rows, list):
@@ -421,11 +421,16 @@ def _finalize(
         unified, rewritten = unify_preference_layout(rows)
         if rewritten:
             result[split] = unified
+            what, each = (
+                ("is a plain-text preference row", "It")
+                if rewritten == 1
+                else ("are plain-text preference rows", "Each")
+            )
             console.print(
-                f"[yellow]Note: {rewritten} of {len(unified)} {split} rows are plain-text "
-                "preference rows in a dataset whose other rows are conversations. Each was "
-                "rewritten as one user turn and one assistant turn per answer, so the "
-                "whole split goes through the chat template.[/]"
+                f"[yellow]Note: {rewritten} of {len(unified)} {split} rows {what} in a "
+                f"dataset whose other rows are conversations. {each} was rewritten as one "
+                "user turn and one assistant turn per answer, so the whole split goes "
+                "through the chat template.[/]"
             )
     return result
 

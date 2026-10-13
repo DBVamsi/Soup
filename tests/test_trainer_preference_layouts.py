@@ -423,6 +423,17 @@ class TestOnlineDpo:
         rows = [{"prompt": "hi"}, {"messages": [user, {"role": "assistant", "content": "yo"}]}]
         assert self._prompt_rows(rows) == [{"prompt": [user]}, {"prompt": [user]}]
 
+    def test_a_row_with_a_string_prompt_and_messages_gives_one_prompt(self):
+        """One row, one prompt: the string, as before. (UltraFeedback rows carry
+        both keys, and so does a row whose source columns were kept.)"""
+        rows = [{"prompt": "x", "messages": [{"role": "user", "content": "y"}]}]
+        assert self._prompt_rows(rows) == [{"prompt": [{"role": "user", "content": "x"}]}]
+
+    def test_a_row_with_a_message_list_prompt_and_messages_gives_one_prompt(self):
+        prompt = [{"role": "user", "content": "x"}]
+        rows = [{"prompt": prompt, "messages": [{"role": "user", "content": "y"}]}]
+        assert self._prompt_rows(rows) == [{"prompt": prompt}]
+
 
 class TestGrpoAndPpoReadTheSamePrompt:
     """Both accept dpo rows and read the prompt only; a bundled row gave one
