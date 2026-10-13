@@ -371,6 +371,39 @@ def _copies_at_the_allowance(keys: int) -> int:
     return copies
 
 
+def _merge_fan_of_size(copies: int, keys: int, size: int) -> str:
+    """``_merge_fan`` padded with a trailing comment to exactly ``size`` bytes."""
+    text = _merge_fan(copies, keys)
+    padding = size - len(text.encode())
+    assert padding >= 2, padding
+    text += "#" + "x" * (padding - 2) + "\n"
+    assert len(text.encode()) == size
+    return text
+
+
+#: 700 copies of a 10-pair mapping: 14,000 merged nodes (two per pair).
+_COPIES, _KEYS = 700, 10
+_MERGED = 2 * _COPIES * _KEYS
+
+
+def test_merged_nodes_equal_to_the_allowance_load():
+    size = _MERGED - yaml_limits.ALIAS_EXPANSION_SLACK
+    text = _merge_fan_of_size(_COPIES, _KEYS, size)
+    assert _allowance(text) == _MERGED
+    assert load_yaml_limited(text, "doc", max_bytes=10**6) == yaml.safe_load(text)
+
+
+def test_merged_nodes_one_past_the_allowance_are_refused():
+    size = _MERGED - yaml_limits.ALIAS_EXPANSION_SLACK - 1
+    text = _merge_fan_of_size(_COPIES, _KEYS, size)
+    assert _allowance(text) == _MERGED - 1
+    with pytest.raises(YamlLimitError) as raised:
+        load_yaml_limited(text, "doc", max_bytes=10**6)
+    assert str(raised.value) == (
+        f"doc expands to more than {_MERGED - 1} nodes from {size} bytes of YAML; refusing"
+    )
+
+
 def test_merged_pairs_exactly_at_the_node_allowance_load():
     copies = _copies_at_the_allowance(10)
     text = _merge_fan(copies)
@@ -600,3 +633,32 @@ def test_file_over_the_node_allowance_is_refused_by_name(tmp_path):
     path.write_text(_alias_fan_out(9), encoding="utf-8")
     with pytest.raises(YamlLimitError, match="f.yaml expands to more than"):
         load_yaml_file_limited(path, "f.yaml", max_bytes=10**6)
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "raised_by_pyyaml"),
+    [
+        ("a: !!bool foo\n", "bool", KeyError),
+        ("a: !!bool ''\n", "bool", KeyError),
+        ("a: !!timestamp foo\n", "timestamp", AttributeError),
+        ('a: !!int ""\n', "int", IndexError),
+        ('a: !!float ""\n', "float", IndexError),
+    ],
+)
+def test_text_an_explicit_tag_cannot_convert_is_the_same_scalar_error(
+    text, name, raised_by_pyyaml
+):
+    with pytest.raises(raised_by_pyyaml):
+        yaml.safe_load(text)
+    with pytest.raises(yaml_limits.YamlScalarError) as raised:
+        load_yaml_limited(text, "doc", max_bytes=64)
+    assert raised.value.problem == f"cannot build this value: not a valid {name}"
+    assert (raised.value.problem_mark.line, raised.value.problem_mark.column) == (0, 3)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a: !!bool yes\n", "a: !!int '12'\n", "a: !!float '1.5'\n", "a: !!timestamp 2026-01-02\n"],
+)
+def test_text_an_explicit_tag_can_convert_loads_as_before(text):
+    assert load_yaml_limited(text, "doc", max_bytes=64) == yaml.safe_load(text)

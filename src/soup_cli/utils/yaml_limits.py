@@ -297,22 +297,29 @@ class YamlScalarError(yaml.constructor.ConstructorError, ValueError):
     the ``ValueError`` the underlying conversion raised."""
 
 
-def _checked(build):
+def _checked(name: str, build):
     def construct(self: _LimitedLoader, node: yaml.ScalarNode) -> object:
         try:
             return build(self, node)
         except ValueError as exc:
-            raise YamlScalarError(
-                None, None, f"cannot build this value: {exc}", node.start_mark
-            ) from None
+            reason = str(exc)
+        except (KeyError, AttributeError, IndexError):
+            # What the conversion raises for text an explicit tag puts in front
+            # of it: `!!bool foo`, `!!timestamp foo`, `!!int ""`.
+            reason = f"not a valid {name}"
+        raise YamlScalarError(
+            None, None, f"cannot build this value: {reason}", node.start_mark
+        )
 
     return construct
 
 
-# The three safe constructors that convert text with a Python call that can refuse it.
-for _name in ("int", "float", "timestamp"):
+# The four safe constructors that convert text with a Python call that can refuse it.
+for _name in ("bool", "int", "float", "timestamp"):
     _tag = f"tag:yaml.org,2002:{_name}"
-    _LimitedLoader.add_constructor(_tag, _checked(yaml.SafeLoader.yaml_constructors[_tag]))
+    _LimitedLoader.add_constructor(
+        _tag, _checked(_name, yaml.SafeLoader.yaml_constructors[_tag])
+    )
 
 
 def _parse(source: str | bytes, what: str, *, source_bytes: int) -> object:
