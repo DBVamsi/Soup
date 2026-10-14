@@ -4836,6 +4836,13 @@ FREEZE_APPLYING_TASKS: frozenset[str] = frozenset({"sft", "tts"})
 #: within these tasks on every path that does not reach those two methods.
 ROPE_SCALING_APPLYING_TASKS: frozenset[str] = frozenset({"sft", "tts", "pretrain"})
 
+#: #1820 — the tasks whose trainer reads ``training.neftune_alpha`` and passes
+#: it as ``neftune_noise_alpha`` to ``TrainingArguments``.  Every other task
+#: ignores the field, so it is refused there at config load.
+NEFTUNE_APPLYING_TASKS: frozenset[str] = frozenset({
+    "sft", "tts", "dpo", "ipo", "kto", "orpo", "simpo", "bco", "preference",
+})
+
 #: The bitsandbytes values: ``4bit`` was the default, so every config Soup dumped
 #: for these tasks carries one of them literally (#795 review).
 _BNB_QUANTIZATION_VALUES = frozenset({"4bit", "8bit"})
@@ -6080,6 +6087,29 @@ class SoupConfig(BaseModel):
                 f"picks bf16/fp16 from the model and GPU ('tts' trains through "
                 f"the SFT trainer), so this run would train at the trainer's "
                 f"default precision. Use task='sft', or remove the key."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_neftune_alpha_task_gate(self) -> "SoupConfig":
+        """#1820: refuse ``neftune_alpha`` on tasks whose trainer never reads it.
+
+        ``training.neftune_alpha`` is forwarded to
+        ``TrainingArguments.neftune_noise_alpha`` by the SFT-family wrappers
+        (``sft.py``, inherited by ``tts.py``) and by the preference-style
+        wrappers (``dpo.py``, ``ipo.py``, ``kto.py``, ``orpo.py``,
+        ``simpo.py``, ``bco.py``).  The ``preference`` dispatcher delegates to
+        one of those, so it also applies.  Every other task silently drops the
+        field — refuse it at load time so the user sees the mismatch instead of
+        training without NEFTune noise and wondering why.
+        """
+        tcfg = self.training
+        if tcfg.neftune_alpha is not None and self.task not in NEFTUNE_APPLYING_TASKS:
+            raise ValueError(
+                f"training.neftune_alpha={tcfg.neftune_alpha!r} is not applied by "
+                f"task={self.task!r}: only task in {sorted(NEFTUNE_APPLYING_TASKS)} "
+                f"forward it to ``TrainingArguments.neftune_noise_alpha``. Remove it, "
+                f"or use one of those tasks."
             )
         return self
 
