@@ -6106,10 +6106,11 @@ class SoupConfig(BaseModel):
         tcfg = self.training
         if tcfg.neftune_alpha is not None and self.task not in NEFTUNE_APPLYING_TASKS:
             raise ValueError(
-                f"training.neftune_alpha={tcfg.neftune_alpha!r} is not applied by "
-                f"task={self.task!r}: only task in {sorted(NEFTUNE_APPLYING_TASKS)} "
-                f"forward it to ``TrainingArguments.neftune_noise_alpha``. Remove it, "
-                f"or use one of those tasks."
+                f"training.neftune_alpha={tcfg.neftune_alpha!r} is set, but "
+                f"task={self.task!r} never applies it (any value, including 0.0, "
+                f"is refused). Only tasks in {sorted(NEFTUNE_APPLYING_TASKS)} forward "
+                f"it to ``TrainingArguments.neftune_noise_alpha``. Remove "
+                f"training.neftune_alpha, or use one of those tasks."
             )
         return self
 

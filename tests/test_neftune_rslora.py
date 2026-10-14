@@ -313,33 +313,25 @@ class TestNEFTuneTaskGate:
         with pytest.raises(ValidationError, match="training.neftune_alpha"):
             self._make_cfg(task, 5.0, **extra)
 
-    def test_mutation_check_drop_one_task(self):
+    def test_mutation_check_drop_one_task(self, monkeypatch):
         """Mutation test: removing a task from NEFTUNE_APPLYING_TASKS fails.
 
         Verifies that the validator uses the NEFTUNE_APPLYING_TASKS constant
-        (not a hardcoded set) by checking that the source code references it,
-        and that the constant contains exactly the expected tasks.
+        (not a hardcoded set) by dropping one task and checking that the
+        config is then rejected for that task.
         """
-        # The constant must contain all 9 applying tasks.
-        expected = frozenset({
-            "sft", "tts", "dpo", "ipo", "kto", "orpo", "simpo", "bco",
-            "preference",
-        })
-        assert NEFTUNE_APPLYING_TASKS == expected, (
-            f"NEFTUNE_APPLYING_TASKS must be exactly {sorted(expected)}"
-        )
-        # Verify the validator source references the constant name.
-        import inspect
+        import soup_cli.config.schema as schema_module
 
-        from soup_cli.config.schema import SoupConfig
-
-        source = inspect.getsource(
-            SoupConfig._validate_neftune_alpha_task_gate,
+        monkeypatch.setattr(
+            schema_module,
+            "NEFTUNE_APPLYING_TASKS",
+            NEFTUNE_APPLYING_TASKS - {"dpo"},
         )
-        assert "NEFTUNE_APPLYING_TASKS" in source, (
-            "Validator must reference NEFTUNE_APPLYING_TASKS constant"
-        )
-        # Verify that a task NOT in the constant is rejected.
-        rejected_task = "grpo"  # not in the applying set
+        # dpo is no longer in the set, so neftune_alpha=5.0 should be refused.
         with pytest.raises(ValidationError, match="training.neftune_alpha"):
-            self._make_cfg(rejected_task, 5.0)
+            self._make_cfg("dpo", 5.0)
+
+    def test_neftune_alpha_zero_is_refused(self):
+        """neftune_alpha=0.0 is refused on non-applying tasks (the gate checks is not None)."""
+        with pytest.raises(ValidationError, match="training.neftune_alpha"):
+            self._make_cfg("grpo", 0.0)
