@@ -277,6 +277,49 @@ class TestRunGate:
         assert result.passed is True
         assert result.regression is False
 
+    def test_run_gate_rejects_nan_regression_threshold(self, tmp_path, monkeypatch):
+        """NaN regression_threshold must raise ValueError before generation."""
+        monkeypatch.chdir(tmp_path)
+        from soup_cli.eval.gate import EvalSuite, GateTask, run_gate
+
+        tasks_file = self._suite_with_custom_task(tmp_path)
+        suite = EvalSuite(
+            suite="nan-threshold",
+            tasks=[GateTask(
+                type="custom", name="math", tasks=str(tasks_file),
+                scorer="exact", threshold=0.0,
+            )],
+        )
+        with pytest.raises(ValueError, match="regression_threshold.*finite"):
+            run_gate(
+                suite,
+                generate_fn=lambda _: "no",
+                baseline={"math": 1.0},
+                regression_threshold=float("nan"),
+            )
+
+    def test_run_gate_rejects_inf_regression_threshold(self, tmp_path, monkeypatch):
+        "+inf and -inf regression_threshold must raise ValueError before generation."
+        monkeypatch.chdir(tmp_path)
+        from soup_cli.eval.gate import EvalSuite, GateTask, run_gate
+
+        tasks_file = self._suite_with_custom_task(tmp_path)
+        suite = EvalSuite(
+            suite="inf-threshold",
+            tasks=[GateTask(
+                type="custom", name="math", tasks=str(tasks_file),
+                scorer="exact", threshold=0.0,
+            )],
+        )
+        for val in (float("inf"), -float("inf")):
+            with pytest.raises(ValueError, match="regression_threshold.*finite"):
+                run_gate(
+                    suite,
+                    generate_fn=lambda _: "no",
+                    baseline={"math": 1.0},
+                    regression_threshold=val,
+                )
+
 
 # ---------------------------------------------------------------------------
 # Callback integration
