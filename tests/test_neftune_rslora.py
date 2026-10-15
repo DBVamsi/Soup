@@ -1,5 +1,7 @@
 """Tests for NEFTune (neftune_alpha) and rsLoRA (use_rslora) support."""
 
+import typing
+
 import pytest
 from pydantic import ValidationError
 
@@ -250,13 +252,14 @@ class TestRsLoRASweep:
 # NEFTune task-gate (issue #1820)
 # ---------------------------------------------------------------------------
 
-#: All 23 tasks declared in the ``task`` Literal of SoupConfig.
-ALL_TASKS: frozenset[str] = frozenset({
-    "sft", "dpo", "grpo", "ppo", "reward_model", "kto", "orpo", "simpo", "ipo",
-    "bco", "preference", "pretrain", "embedding", "prm",
-    "tts", "classifier", "reranker", "cross_encoder", "distill",
-    "unlearn", "moe_lora_routing", "online_dpo", "asr",
-})
+#: All tasks declared in the ``task`` Literal of SoupConfig, derived via
+#: ``typing.get_args`` so adding a task to the schema Literal updates this.
+ALL_TASKS: frozenset[str] = frozenset(
+    typing.get_args(SoupConfig.model_fields["task"].annotation),
+)
+
+#: NEFTUNE_APPLYING_TASKS must be a subset of ALL_TASKS.
+assert NEFTUNE_APPLYING_TASKS.issubset(ALL_TASKS)
 
 
 class TestNEFTuneTaskGate:
@@ -310,7 +313,9 @@ class TestNEFTuneTaskGate:
             extra["num_labels"] = 2
         if task == "distill":
             extra["teacher_model"] = "teacher"
-        with pytest.raises(ValidationError, match="training.neftune_alpha"):
+        with pytest.raises(
+            ValidationError, match=rf"training\.neftune_alpha.*task='{task}'"
+        ):
             self._make_cfg(task, 5.0, **extra)
 
     def test_mutation_check_drop_one_task(self, monkeypatch):
@@ -328,10 +333,20 @@ class TestNEFTuneTaskGate:
             NEFTUNE_APPLYING_TASKS - {"dpo"},
         )
         # dpo is no longer in the set, so neftune_alpha=5.0 should be refused.
-        with pytest.raises(ValidationError, match="training.neftune_alpha"):
+        with pytest.raises(
+            ValidationError, match=r"training\.neftune_alpha.*task='dpo'"
+        ):
             self._make_cfg("dpo", 5.0)
 
     def test_neftune_alpha_zero_is_refused(self):
-        """neftune_alpha=0.0 is refused on non-applying tasks (the gate checks is not None)."""
-        with pytest.raises(ValidationError, match="training.neftune_alpha"):
+        """neftune_alpha=0.0 is refused on non-applying tasks (gate checks is not None)."""
+        with pytest.raises(
+            ValidationError, match=r"training\.neftune_alpha.*task='grpo'"
+        ):
             self._make_cfg("grpo", 0.0)
+
+    def test_applying_tasks_pinned(self):
+        """NEFTUNE_APPLYING_TASKS is pinned literally — removing any task fails."""
+        assert NEFTUNE_APPLYING_TASKS == frozenset({
+            "sft", "tts", "dpo", "ipo", "kto", "orpo", "simpo", "bco", "preference",
+        })
